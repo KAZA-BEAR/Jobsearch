@@ -32,7 +32,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from linkedin_jobs import Job, Store, data_dir
+from linkedin_jobs import Job, Store, apply_saved_api_keys, data_dir
 
 CONFIG_PATH = data_dir() / "sweep_config.json"
 STATE_PATH = data_dir() / "sweep_state.json"
@@ -51,6 +51,12 @@ DEFAULT_CONFIG = {
         "research": True,
         "boards": True,
         "eures": False,
+        "adzuna_eu": False,     # needs the free Adzuna key
+        # US / Asia-Pacific: off by default; USAJOBS and Adzuna need free keys
+        "us_asia_boards": False,
+        "usajobs": False,
+        "adzuna": False,
+        "mcf": False,
     },
     "ba": {
         # where "" = nationwide
@@ -69,6 +75,15 @@ DEFAULT_CONFIG = {
     "research": {"sources": ["fraunhofer", "dlr", "mpg", "thd"],
                  "keywords": ["robotik", "mechatronik", "autonom"]},
     "eures": {"countries": ["DE"], "field": "robotics"},
+    # Adzuna in Europe, filtered by keep_adzuna_europe. Empty roles / fields =
+    # each country's defaults in its own language (eu_student_jobs.ADZUNA_EU_DEFAULTS).
+    "adzuna_eu": {"countries": ["de"], "roles": [], "fields": "",
+                  "where": "", "radius": 100, "days": 3},
+    # searches shared by USAJOBS, Adzuna and MyCareersFuture
+    "us_asia": {"fields": ["robotics", "mechatronics"],
+                "adzuna_countries": ["us", "sg"],
+                "usajobs_location": "",
+                "days": 3},
 }
 
 
@@ -140,6 +155,7 @@ def run_sweep(force: bool = False, log=print, cancelled: threading.Event | None 
         return None
 
     cfg = load_config()
+    apply_saved_api_keys()      # the scheduled task runs without the app
     if store is None:
         from fit_score import load_default_scorer
         scorer = load_default_scorer()
@@ -249,6 +265,9 @@ def run_sweep(force: bool = False, log=print, cancelled: threading.Event | None 
                     keep("eures", [j for j in jobs if is_student_suitable(j)[0]])
                 except Exception as exc:
                     fail("eures", code, exc)
+
+        _sweep_adzuna_eu(cfg, stop, log, keep, fail)
+        _sweep_us_asia(cfg, stop, log, keep, fail)
     finally:
         new_rows = store.seen_since(started_utc)
         min_fit = int(cfg.get("min_fit", 50))
@@ -278,6 +297,106 @@ def run_sweep(force: bool = False, log=print, cancelled: threading.Event | None 
         notify("New job matches",
                f"{len(top)} new jobs with fit ≥ {min_fit}. Top: {top[0]['title'][:60]}")
     return summary
+
+
+def _sweep_adzuna_eu(cfg: dict, stop: threading.Event, log, keep, fail) -> None:
+    if not cfg["sources"].get("adzuna_eu") or stop.is_set():
+        return
+    from eu_student_jobs import ADZUNA_EU_DEFAULTS, keep_adzuna_europe
+    from us_asia_jobs import AdzunaProvider
+    try:
+        p = AdzunaProvider()
+    except SystemExit:
+        log("[sweep] adzuna_eu skipped: no API key. Add it under API keys in the app.")
+        return
+    ae = cfg["adzuna_eu"]
+    for country in ae.get("countries") or ["de"]:
+        roles, fields = ADZUNA_EU_DEFAULTS.get(country, (("",), ""))
+        roles = ae.get("roles") or roles
+        fields = ae.get("fields") or fields
+        for role in roles:
+            if stop.is_set():
+                return
+            try:
+                jobs = p.search(role, country, 1, max_days_old=int(ae.get("days", 3)),
+                                on_log=log, where=ae.get("where", ""),
+                                distance_km=int(ae.get("radius", 0)), any_of=fields)
+                keep("adzuna_eu", [j for j in jobs if keep_adzuna_europe(j, False)])
+            except Exception as exc:
+                fail("adzuna_eu", f"{country} '{role}'", exc)
+
+
+def _sweep_us_asia(cfg: dict, stop: threading.Event, log, keep, fail) -> None:
+    """The US / Asia-Pacific sources, filtered like us_asia_jobs.py: robotics
+    and mechatronics roles without senior titles."""
+    src = cfg["sources"]
+    ua = cfg["us_asia"]
+    fields = ua.get("fields") or ["robotics"]
+    if not any(src.get(k) for k in ("us_asia_boards", "usajobs", "adzuna", "mcf")):
+        return
+    from us_asia_jobs import (US_ASIA_BOARDS, AdzunaProvider, MyCareersFutureProvider,
+                              USAJobsProvider, _keep)
+    relevant = lambda jobs: [j for j in jobs if _keep(j, False)[0]]
+
+    if src.get("us_asia_boards") and not stop.is_set():
+        from robotics_track import GRAD_MARKERS, ATSBoards
+        fetcher = ATSBoards()
+        kept: list[Job] = []
+        for b in US_ASIA_BOARDS:
+            if stop.is_set():
+                break
+            if b.ats == "none":         # no public board; the app searches these by name
+                continue
+            try:
+                for job in relevant(fetcher.fetch(b)):
+                    # labelled like the app's Graduate employer boards search
+                    grad = GRAD_MARKERS.search(f"{job.title} {job.description[:800]}")
+                    job.employment_type = "graduate" if grad else "entry-candidate"
+                    kept.append(job)
+            except Exception as exc:
+                fail("us_asia_boards", b.company, exc)
+        keep("us_asia_boards", kept)
+        log(f"[sweep] US & Asia employer boards: {len(kept)} relevant roles")
+
+    # The keyed providers raise SystemExit (not an Exception) when a key is missing.
+    def provider(name: str, cls):
+        try:
+            return cls()
+        except SystemExit:
+            log(f"[sweep] {name} skipped: no API key. Add it under API keys in the app.")
+            return None
+
+    if src.get("usajobs") and not stop.is_set() and (p := provider("usajobs", USAJobsProvider)):
+        for f in fields:
+            if stop.is_set():
+                break
+            try:
+                keep("usajobs", relevant(p.search(f, 1, ua.get("usajobs_location", ""),
+                                                  on_log=log)))
+            except Exception as exc:
+                fail("usajobs", f, exc)
+
+    if src.get("adzuna") and not stop.is_set() and (p := provider("adzuna", AdzunaProvider)):
+        for country in ua.get("adzuna_countries") or ["us"]:
+            for f in fields:
+                if stop.is_set():
+                    break
+                try:
+                    keep("adzuna", relevant(p.search(f, country, 1,
+                                                     max_days_old=int(ua.get("days", 3)),
+                                                     on_log=log)))
+                except Exception as exc:
+                    fail("adzuna", f"{country} '{f}'", exc)
+
+    if src.get("mcf") and not stop.is_set():
+        p = MyCareersFutureProvider()
+        for f in fields:
+            if stop.is_set():
+                break
+            try:
+                keep("mcf", relevant(p.search(f, 1, on_log=log)))
+            except Exception as exc:
+                fail("mcf", f, exc)
 
 
 def _custom_personio(cfg: dict):

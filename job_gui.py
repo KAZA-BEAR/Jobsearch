@@ -4,14 +4,16 @@ job_gui.py — desktop front-end for the EU robotics / mechatronics job search.
 
 Run:  python job_gui.py
 
-Needs linkedin_jobs.py, eu_student_jobs.py and robotics_track.py in the same
-folder. Tkinter ships with Python; nothing else to install beyond `requests`.
+Needs the other job modules in the same folder. Tkinter ships with Python;
+nothing else to install beyond `requests`. Everything the command-line tools
+can search or report is also reachable here.
 """
 
 from __future__ import annotations
 
 import csv
 import json
+import os
 import queue
 import re
 import sys
@@ -24,10 +26,13 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-from linkedin_jobs import Store, Job, STATUSES, age_hours, data_dir, parse_posted
-from eu_student_jobs import MARKETS, KINDS, EuresProvider, classify, is_student_suitable
+from linkedin_jobs import (Store, Job, STATUSES, age_hours, data_dir, parse_posted,
+                           apply_saved_api_keys,
+                           load_settings, settings_path)
+from eu_student_jobs import (MARKETS, KINDS, EuresProvider, classify, is_student_suitable,
+                             ADZUNA_EUROPE, ADZUNA_EU_DEFAULTS, keep_adzuna_europe)
 from ats_pipeline import (
-    DEFAULT_BACKEND, DEFAULT_BASE_URL, DEFAULT_LOCAL_MODELS, DEFAULT_MODEL,
+    DEFAULT_BACKEND, DEFAULT_BASE_URL, DEFAULT_LOCAL_MODELS,
     PipelineError, list_local_models, run as ats_run,
 )
 from ats_regions import DEFAULT_REGION, REGIONS as ATS_REGIONS
@@ -41,6 +46,11 @@ from company_radar import (
 from us_asia_jobs import (
     US_ASIA_BOARDS,
     COUNTRY_NAMES as US_ASIA_COUNTRY_NAMES,
+    REGIONS as US_ASIA_REGIONS,
+    USAJobsProvider,
+    AdzunaProvider,
+    MyCareersFutureProvider,
+    _keep as us_asia_keep,
 )
 from robotics_track import (
     BOARDS,
@@ -57,12 +67,14 @@ from robotics_track import (
 )
 from jobspy_provider import JobSpyProvider, DEFAULT_SITES, INDEED_COUNTRIES
 from ba_jobsuche import BAJobsucheProvider, OFFER_TYPES as BA_OFFER_TYPES
-from personio_jobs import COMPANIES as PERSONIO_COMPANIES, PersonioCompany, PersonioFeeds
+from personio_jobs import (COMPANIES as PERSONIO_COMPANIES, PersonioCompany, PersonioFeeds,
+                           slug_candidates as personio_slug_candidates)
 from workday_jobs import SITES as WORKDAY_SITES, WorkdayBoards, parse_url as parse_workday_url
 from research_jobs import SOURCES as RESEARCH_SOURCES, ResearchFeeds
 from fit_score import (FitScorer, default_profile_path, is_bundled_copy, load_default_scorer,
                        remember_profile_path, rescore)
 import daily_sweep
+import system_checks
 
 # board.country ("DE", "US", "JP", ...) -> jobspy's expected country_indeed spelling
 JOBSPY_COUNTRY_NAMES = {**EU_COUNTRY_NAMES, **US_ASIA_COUNTRY_NAMES}
@@ -121,6 +133,32 @@ _data_dir = data_dir
 
 DB = str(_data_dir() / "robotics_jobs.db")
 
+# Keys the providers read from the environment. The API keys dialog saves them
+# in settings.json and copies them into os.environ, so the providers need no
+# changes. The daily sweep loads them too (apply_saved_api_keys); the other
+# command-line tools keep reading real environment variables.
+API_KEYS = (
+    ("USAJOBS_API_KEY", "USAJOBS key", "https://developer.usajobs.gov/apirequest"),
+    ("USAJOBS_EMAIL", "USAJOBS email (the one you registered)", ""),
+    ("ADZUNA_APP_ID", "Adzuna app ID", "https://developer.adzuna.com/"),
+    ("ADZUNA_APP_KEY", "Adzuna app key", ""),
+)
+
+
+_settings_path = settings_path
+_load_settings = load_settings
+
+
+def save_api_keys(keys: dict[str, str]) -> None:
+    settings = _load_settings()
+    settings["api_keys"] = {k: v for k, v in keys.items() if v}
+    _settings_path().write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    for name, value in keys.items():
+        if value:
+            os.environ[name] = value
+        else:
+            os.environ.pop(name, None)
+
 
 # --------------------------------------------------------------------------
 # Background worker
@@ -161,6 +199,7 @@ class App(tk.Tk):
         self.geometry("1100x720")
         self.minsize(900, 600)
 
+        apply_saved_api_keys()
         self.scorer: FitScorer | None = load_default_scorer()
         self.store = Store(DB, scorer=self.scorer.score if self.scorer else None)
         if self.scorer:
@@ -196,6 +235,9 @@ class App(tk.Tk):
     def _build_layout(self) -> None:
         outer = ttk.Frame(self, padding=8)
         outer.pack(fill="both", expand=True)
+        # Packed first, at the bottom: packed last, a short window pushed it out
+        # of view, taking the Stop and API keys buttons with it.
+        self._statusbar(outer)
 
         panes = ttk.PanedWindow(outer, orient="vertical")
         panes.pack(fill="both", expand=True)
@@ -215,10 +257,18 @@ class App(tk.Tk):
             ("EURES internships / Werkstudent", self._panel_student),
             ("Personio", self._panel_personio),
             ("Workday", self._panel_workday),
+            ("Adzuna (Europe)", self._panel_adzuna_eu),
             ("LinkedIn / Indeed", self._panel_jobspy),
+        ])
+        self._tab_switcher("  US & Asia  ", [
+            ("USAJOBS (US federal)", self._panel_usajobs),
+            ("Adzuna (US / Asia-Pacific)", self._panel_adzuna),
+            ("MyCareersFuture (SG)", self._panel_mcf),
+            ("Market notes", self._panel_markets),
         ])
         self._tab_radar()
         self._tab_apps()
+        self._tab_tests()
         self.tabs.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
         mid = ttk.Frame(panes)
@@ -229,7 +279,6 @@ class App(tk.Tk):
         panes.add(bot, weight=1)
         self._console(bot)
 
-        self._statusbar(outer)
         self.after(50, self._fit_tabs)
 
     def _fit_tabs(self) -> None:
@@ -288,6 +337,10 @@ class App(tk.Tk):
         self.phd_pages = tk.IntVar(value=2)
         ttk.Spinbox(f, from_=1, to=10, textvariable=self.phd_pages, width=5).grid(
             row=0, column=3, sticky="w", padx=6)
+        ttk.Label(f, text="Terms per country").grid(row=0, column=4, sticky="w", padx=(18, 0))
+        self.phd_max_terms = tk.IntVar(value=3)
+        ttk.Spinbox(f, from_=1, to=10, textvariable=self.phd_max_terms, width=5).grid(
+            row=0, column=5, sticky="w", padx=6)
 
         self.phd_funded = tk.BooleanVar(value=True)
         ttk.Checkbutton(f, text="Funded positions only (salary / TV-L E13 / MSCA)",
@@ -385,8 +438,22 @@ class App(tk.Tk):
                                                 codes=list(MARKETS),
                                                 preset={"DE", "NL", "SE"})
 
+        opts = ttk.Frame(f)
+        opts.grid(row=2, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        ttk.Label(opts, text="Pages").pack(side="left")
+        self.stu_pages = tk.IntVar(value=1)
+        ttk.Spinbox(opts, from_=1, to=10, textvariable=self.stu_pages, width=4).pack(
+            side="left", padx=(4, 14))
+        ttk.Label(opts, text="Search terms per country").pack(side="left")
+        self.stu_max_terms = tk.IntVar(value=6)
+        ttk.Spinbox(opts, from_=1, to=20, textvariable=self.stu_max_terms, width=4).pack(
+            side="left", padx=(4, 14))
+        self.stu_strict = tk.BooleanVar(value=False)
+        ttk.Checkbutton(opts, text="Only clearly student-level roles",
+                        variable=self.stu_strict).pack(side="left")
+
         ttk.Button(f, text="Search EURES", style="Run.TButton",
-                   command=self.run_student).grid(row=2, column=1, sticky="w", pady=(12, 0))
+                   command=self.run_student).grid(row=3, column=1, sticky="w", pady=(12, 0))
 
     # ---------------- tab: Bundesagentur für Arbeit ----------------
 
@@ -419,6 +486,14 @@ class App(tk.Tk):
         self.ba_days = tk.IntVar(value=7)
         ttk.Spinbox(f, from_=0, to=100, textvariable=self.ba_days, width=5).grid(
             row=1, column=3, sticky="w", padx=6)
+        ttk.Label(f, text="Pages (50 each)").grid(row=1, column=4, sticky="w")
+        self.ba_pages = tk.IntVar(value=3)
+        ttk.Spinbox(f, from_=1, to=10, textvariable=self.ba_pages, width=5).grid(
+            row=1, column=5, sticky="w", padx=6)
+        ttk.Label(f, text="Full descriptions").grid(row=2, column=4, sticky="w")
+        self.ba_details = tk.IntVar(value=40)
+        ttk.Spinbox(f, from_=0, to=200, increment=10, textvariable=self.ba_details,
+                    width=5).grid(row=2, column=5, sticky="w", padx=6)
 
         self.ba_part_time = tk.BooleanVar(value=False)
         ttk.Checkbutton(f, text="Part-time only (typical for Werkstudent)",
@@ -427,8 +502,8 @@ class App(tk.Tk):
         ttk.Label(f, foreground="#555", wraplength=720, justify="left",
                   text="Germany's largest job database (Bundesagentur für Arbeit). Leave 'Near' "
                        "empty for nationwide. 'Posted within days' = 1 gives the last 24 hours. "
-                       "Full descriptions are fetched for the first 40 hits so the fit score "
-                       "and German-language check work.").grid(
+                       "Full descriptions are fetched for the first hits (40 by default) so the "
+                       "fit score and German-language check work.").grid(
             row=3, column=0, columnspan=6, sticky="w", pady=(6, 0))
         ttk.Button(f, text="Search Arbeitsagentur", style="Run.TButton",
                    command=self.run_ba).grid(row=4, column=1, sticky="w", pady=(12, 0))
@@ -443,10 +518,13 @@ class App(tk.Tk):
         offer = "" if self.ba_offer.get() == "(any)" else self.ba_offer.get()
         days = self.ba_days.get()
         work_time = "teilzeit" if self.ba_part_time.get() else ""
+        pages = self.ba_pages.get()
+        details = self.ba_details.get()
 
         def task(w: Worker) -> None:
             jobs = BAJobsucheProvider().search(query, where, radius, offer, work_time, days,
-                                               pages=3, on_log=w.log, cancelled=w.cancelled,
+                                               pages=pages, details=details,
+                                               on_log=w.log, cancelled=w.cancelled,
                                                cached=self._cached_description)
             new = 0
             for job in jobs:
@@ -480,13 +558,51 @@ class App(tk.Tk):
         ttk.Label(f, text="Extra slugs").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.personio_extra = ttk.Entry(f, width=42)
         self.personio_extra.grid(row=1, column=1, sticky="w", pady=(8, 0))
+        ttk.Label(f, text="Find by name").grid(row=2, column=0, sticky="w", pady=(4, 0))
+        self.personio_names = ttk.Entry(f, width=42)
+        self.personio_names.grid(row=2, column=1, sticky="w", pady=(4, 0))
+        ttk.Button(f, text="Find slugs", command=self.run_personio_probe).grid(
+            row=2, column=2, sticky="w", padx=6, pady=(4, 0))
         ttk.Label(f, foreground="#555", wraplength=720, justify="left",
                   text="Many German startups and Mittelstand firms recruit via Personio. Find the "
                        "slug in a company's careers link (xyz.jobs.personio.de → xyz) and add it, "
-                       "comma-separated. Nothing selected = all listed employers.").grid(
-            row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
+                       "comma-separated, or type company names under 'Find by name' and the app "
+                       "tries likely slugs, adding the ones that work. Nothing selected = all "
+                       "listed employers.").grid(
+            row=3, column=0, columnspan=3, sticky="w", pady=(6, 0))
         ttk.Button(f, text="Fetch Personio jobs", style="Run.TButton",
-                   command=self.run_personio).grid(row=3, column=1, sticky="w", pady=(12, 0))
+                   command=self.run_personio).grid(row=4, column=1, sticky="w", pady=(12, 0))
+
+    def run_personio_probe(self) -> None:
+        names = [n.strip() for n in self.personio_names.get().split(",") if n.strip()]
+        if not names:
+            messagebox.showwarning("No names", "Type one or more company names, comma-separated.")
+            return
+
+        def add_slug(slug: str) -> None:
+            have = [s.strip() for s in self.personio_extra.get().split(",") if s.strip()]
+            if slug not in have:
+                self.personio_extra.delete(0, "end")
+                self.personio_extra.insert(0, ", ".join(have + [slug]))
+
+        def task(w: Worker) -> None:
+            feeds = PersonioFeeds()
+            for name in names:
+                if w.cancelled.is_set():
+                    return
+                hit = None
+                for slug in personio_slug_candidates(name):
+                    jobs = feeds.fetch(PersonioCompany(name, slug))
+                    if jobs is not None:
+                        hit = (slug, len(jobs))
+                        break
+                if hit:
+                    w.log(f"{name}: Personio slug '{hit[0]}' ({hit[1]} roles) — added to Extra slugs")
+                    self._ui(lambda s=hit[0]: add_slug(s))
+                else:
+                    w.log(f"{name}: no Personio feed found")
+
+        self.start(f"Personio · finding {len(names)} slug(s)", task)
 
     def run_personio(self) -> None:
         picked = self.personio_list.curselection()
@@ -515,6 +631,102 @@ class App(tk.Tk):
 
     # ---------------- tab: Workday ----------------
 
+    # ---------------- tab: Adzuna Europe ----------------
+
+    def _panel_adzuna_eu(self, f) -> None:
+        ttk.Label(f, text="Country").grid(row=0, column=0, sticky="w", pady=3)
+        self.adzeu_country = ttk.Combobox(
+            f, width=18, state="readonly",
+            values=[f"{c} · {n}" for c, n in ADZUNA_EUROPE.items()])
+        self.adzeu_country.set("de · Germany")
+        self.adzeu_country.grid(row=0, column=1, sticky="w", padx=6)
+        self.adzeu_country.bind("<<ComboboxSelected>>", lambda _e: self._adzeu_defaults())
+        ttk.Label(f, text="Role (all words)").grid(row=0, column=2, sticky="w", padx=(18, 0))
+        self.adzeu_role = ttk.Combobox(f, width=20, values=[
+            "Werkstudent", "Praktikum", "Masterarbeit", "Bachelorarbeit", "Abschlussarbeit",
+            "Trainee", "Junior", "internship", "graduate", "placement", "stage", "afstudeerstage",
+            "tirocinio", "prácticas", "staż", ""])
+        self.adzeu_role.grid(row=0, column=3, sticky="w", padx=6)
+
+        ttk.Label(f, text="Field (any of)").grid(row=1, column=0, sticky="w", pady=3)
+        self.adzeu_field = ttk.Entry(f, width=72)
+        self.adzeu_field.grid(row=1, column=1, columnspan=3, sticky="w", padx=6)
+        self._adzeu_defaults()
+
+        ttk.Label(f, text="Near").grid(row=2, column=0, sticky="w", pady=3)
+        self.adzeu_where = ttk.Entry(f, width=18)
+        self.adzeu_where.grid(row=2, column=1, sticky="w", padx=6)
+        ttk.Label(f, text="Radius km").grid(row=2, column=2, sticky="w", padx=(18, 0))
+        self.adzeu_radius = tk.IntVar(value=100)
+        ttk.Spinbox(f, from_=0, to=300, increment=25, textvariable=self.adzeu_radius,
+                    width=5).grid(row=2, column=3, sticky="w", padx=6)
+
+        ttk.Label(f, text="Pages (50 each)").grid(row=3, column=0, sticky="w", pady=3)
+        self.adzeu_pages = tk.IntVar(value=2)
+        ttk.Spinbox(f, from_=1, to=10, textvariable=self.adzeu_pages, width=5).grid(
+            row=3, column=1, sticky="w", padx=6)
+        ttk.Label(f, text="Posted within days").grid(row=3, column=2, sticky="w", padx=(18, 0))
+        self.adzeu_days = tk.IntVar(value=14)
+        ttk.Spinbox(f, from_=1, to=90, textvariable=self.adzeu_days, width=5).grid(
+            row=3, column=3, sticky="w", padx=6)
+        self.adzeu_strict = tk.BooleanVar(value=False)
+        ttk.Checkbutton(f, text="Only student / internship / thesis / graduate titles",
+                        variable=self.adzeu_strict).grid(row=4, column=1, columnspan=3,
+                                                         sticky="w", pady=4)
+        ttk.Label(f, foreground="#555", wraplength=720, justify="left",
+                  text="Adzuna collects jobs from many sites across Europe. It matches whole "
+                       "words: a job must contain the role word and at least one field word. "
+                       "Picking a country fills both in that country's language. Leave 'Near' "
+                       "empty for the whole country. Needs the free Adzuna app ID and key "
+                       "(API keys… in the status bar), the same ones as the US & Asia tab.").grid(
+            row=5, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        ttk.Button(f, text="Search Adzuna", style="Run.TButton",
+                   command=self.run_adzuna_eu).grid(row=6, column=1, sticky="w", pady=(12, 0))
+
+    def _adzeu_defaults(self) -> None:
+        roles, field = ADZUNA_EU_DEFAULTS[self.adzeu_country.get().split(" ", 1)[0]]
+        self.adzeu_role.set(roles[0])
+        self.adzeu_field.delete(0, "end")
+        self.adzeu_field.insert(0, field)
+
+    def run_adzuna_eu(self) -> None:
+        if not self._need_keys("Adzuna", ("ADZUNA_APP_ID", "ADZUNA_APP_KEY")):
+            return
+        role = self.adzeu_role.get().strip()
+        field = self.adzeu_field.get().strip()
+        if not role and not field:
+            messagebox.showwarning("No search term", "Fill in a role or some field words.")
+            return
+        country = self.adzeu_country.get().split(" ", 1)[0]
+        where = self.adzeu_where.get().strip()
+        radius = self.adzeu_radius.get()
+        pages = self.adzeu_pages.get()
+        days = self.adzeu_days.get()
+        strict = self.adzeu_strict.get()
+
+        def task(w: Worker) -> None:
+            try:
+                jobs = AdzunaProvider().search(role, country, pages, max_days_old=days,
+                                               on_log=w.log, where=where, distance_km=radius,
+                                               any_of=field)
+            except SystemExit as exc:
+                w.log(str(exc))
+                return
+            except Exception as exc:
+                w.log(f"Adzuna FAILED: {exc}")
+                return
+            new = kept = 0
+            for job in jobs:
+                if not keep_adzuna_europe(job, strict):
+                    continue
+                kept += 1
+                if self.store.upsert(job):
+                    new += 1
+                    w.found(job)
+            w.log(f"{len(jobs)} returned · {kept} passed the robotics filter · {new} new")
+
+        self.start(f"Adzuna {country.upper()} · {role or 'any role'}", task)
+
     def _panel_workday(self, f) -> None:
 
         ttk.Label(f, text="Search").grid(row=0, column=0, sticky="w", pady=3)
@@ -527,6 +739,10 @@ class App(tk.Tk):
         self.wd_country = ttk.Entry(f, width=16)
         self.wd_country.insert(0, "Germany")
         self.wd_country.grid(row=0, column=3, sticky="w", padx=6)
+        ttk.Label(f, text="Max per employer").grid(row=0, column=4, sticky="w", padx=(18, 0))
+        self.wd_max = tk.IntVar(value=100)
+        ttk.Spinbox(f, from_=10, to=500, increment=10, textvariable=self.wd_max, width=5).grid(
+            row=0, column=5, sticky="w", padx=6)
 
         ttk.Label(f, text="Employers").grid(row=1, column=0, sticky="nw", pady=(8, 0))
         box = ttk.Frame(f)
@@ -563,6 +779,7 @@ class App(tk.Tk):
                 return
         text = self.wd_query.get().strip()
         country = self.wd_country.get().strip()
+        max_jobs = self.wd_max.get()
 
         def task(w: Worker) -> None:
             wb = WorkdayBoards()
@@ -570,7 +787,7 @@ class App(tk.Tk):
                 if w.cancelled.is_set():
                     return
                 try:
-                    jobs = wb.search(site, text, country, max_jobs=100, details=30,
+                    jobs = wb.search(site, text, country, max_jobs=max_jobs, details=30,
                                      on_log=w.log, cancelled=w.cancelled,
                                      cached=self._cached_description)
                 except Exception as exc:
@@ -805,7 +1022,11 @@ class App(tk.Tk):
 
     SWEEP_SOURCES = (("ba", "Arbeitsagentur"), ("personio", "Personio"),
                      ("workday", "Workday"), ("research", "Research institutes"),
-                     ("boards", "Employer boards (Graduate tab list)"), ("eures", "EURES"))
+                     ("boards", "Employer boards (Graduate tab list)"), ("eures", "EURES"),
+                     ("adzuna_eu", "Adzuna Europe (needs key)"),
+                     ("us_asia_boards", "US & Asia employer boards"),
+                     ("usajobs", "USAJOBS (needs key)"), ("adzuna", "Adzuna (needs key)"),
+                     ("mcf", "MyCareersFuture (SG)"))
 
     def _open_sweep_settings(self) -> None:
         dlg = getattr(self, "_sweep_dlg", None)
@@ -831,7 +1052,7 @@ class App(tk.Tk):
             self.sw_sources[code] = v
 
         opts = ttk.Frame(left)
-        opts.grid(row=10, column=0, sticky="w", pady=(10, 0))
+        opts.grid(row=1 + len(self.SWEEP_SOURCES), column=0, sticky="w", pady=(10, 0))
         ttk.Label(opts, text="Alert when fit ≥").grid(row=0, column=0, sticky="w")
         self.sw_min_fit = tk.IntVar(value=int(cfg.get("min_fit", 50)))
         ttk.Spinbox(opts, from_=0, to=100, increment=5, textvariable=self.sw_min_fit,
@@ -863,6 +1084,55 @@ class App(tk.Tk):
         self.sw_res = ttk.Entry(row2, width=36)
         self.sw_res.insert(0, ", ".join(cfg["research"]["keywords"]))
         self.sw_res.pack(side="left", padx=4)
+
+        ae = cfg["adzuna_eu"]
+        row_ae = ttk.Frame(mid)
+        row_ae.pack(fill="x", pady=(4, 0))
+        ttk.Label(row_ae, text="Adzuna Europe roles").pack(side="left")
+        self.sw_ae_roles = ttk.Entry(row_ae, width=24)
+        self.sw_ae_roles.insert(0, ", ".join(ae.get("roles", [])))
+        self.sw_ae_roles.pack(side="left", padx=4)
+        ttk.Label(row_ae, text="field words").pack(side="left")
+        self.sw_ae_fields = ttk.Entry(row_ae, width=24)
+        self.sw_ae_fields.insert(0, ae.get("fields", ""))
+        self.sw_ae_fields.pack(side="left", padx=4)
+        ttk.Label(mid, foreground="#666", text="Adzuna Europe: leave roles or field words "
+                  "empty to use each country's own-language defaults.").pack(anchor="w")
+        row_ae2 = ttk.Frame(mid)
+        row_ae2.pack(fill="x", pady=(4, 0))
+        ttk.Label(row_ae2, text="countries").pack(side="left")
+        self.sw_ae_countries = ttk.Entry(row_ae2, width=10)
+        self.sw_ae_countries.insert(0, ", ".join(ae.get("countries", [])))
+        self.sw_ae_countries.pack(side="left", padx=4)
+        ttk.Label(row_ae2, text="near").pack(side="left")
+        self.sw_ae_where = ttk.Entry(row_ae2, width=12)
+        self.sw_ae_where.insert(0, ae.get("where", ""))
+        self.sw_ae_where.pack(side="left", padx=4)
+        ttk.Label(row_ae2, text="km").pack(side="left")
+        self.sw_ae_radius = tk.IntVar(value=int(ae.get("radius", 100)))
+        ttk.Spinbox(row_ae2, from_=0, to=300, increment=25, textvariable=self.sw_ae_radius,
+                    width=5).pack(side="left", padx=4)
+        ttk.Label(row_ae2, text="(" + ", ".join(ADZUNA_EUROPE) + ")", foreground="#666").pack(
+            side="left")
+
+        ua = cfg["us_asia"]
+        row3 = ttk.Frame(mid)
+        row3.pack(fill="x", pady=(4, 0))
+        ttk.Label(row3, text="US & Asia searches").pack(side="left")
+        self.sw_ua_fields = ttk.Entry(row3, width=34)
+        self.sw_ua_fields.insert(0, ", ".join(ua.get("fields", [])))
+        self.sw_ua_fields.pack(side="left", padx=4)
+        row4 = ttk.Frame(mid)
+        row4.pack(fill="x", pady=(4, 0))
+        ttk.Label(row4, text="Adzuna countries").pack(side="left")
+        self.sw_ua_countries = ttk.Entry(row4, width=14)
+        self.sw_ua_countries.insert(0, ", ".join(ua.get("adzuna_countries", [])))
+        self.sw_ua_countries.pack(side="left", padx=4)
+        ttk.Label(row4, text="(us, in, sg, au, nz)   posted within").pack(side="left")
+        self.sw_ua_days = tk.IntVar(value=int(ua.get("days", 3)))
+        ttk.Spinbox(row4, from_=1, to=30, textvariable=self.sw_ua_days, width=4).pack(
+            side="left", padx=4)
+        ttk.Label(row4, text="days").pack(side="left")
 
         task = ttk.Frame(mid)
         task.pack(fill="x", pady=(10, 0))
@@ -902,6 +1172,21 @@ class App(tk.Tk):
         cfg["ba"]["searches"] = searches
         cfg["workday"]["queries"] = [q.strip() for q in self.sw_wd.get().split(",") if q.strip()]
         cfg["research"]["keywords"] = [q.strip() for q in self.sw_res.get().split(",") if q.strip()]
+        cfg["us_asia"]["fields"] = [q.strip() for q in self.sw_ua_fields.get().split(",")
+                                    if q.strip()]
+        cfg["us_asia"]["adzuna_countries"] = [
+            c.strip().lower() for c in self.sw_ua_countries.get().split(",")
+            if c.strip().lower() in AdzunaProvider.US_ASIA]
+        cfg["us_asia"]["days"] = int(self.sw_ua_days.get())
+        cfg["adzuna_eu"]["roles"] = [q.strip() for q in self.sw_ae_roles.get().split(",")
+                                     if q.strip()]
+        cfg["adzuna_eu"]["fields"] = self.sw_ae_fields.get().strip()
+        cfg["adzuna_eu"].pop("queries", None)
+        cfg["adzuna_eu"]["countries"] = [
+            c.strip().lower() for c in self.sw_ae_countries.get().split(",")
+            if c.strip().lower() in ADZUNA_EUROPE]
+        cfg["adzuna_eu"]["where"] = self.sw_ae_where.get().strip()
+        cfg["adzuna_eu"]["radius"] = int(self.sw_ae_radius.get())
         return cfg
 
     def _sweep_save(self) -> None:
@@ -1016,6 +1301,11 @@ class App(tk.Tk):
         self.jobspy_remote = tk.BooleanVar(value=False)
         ttk.Checkbutton(f, text="Remote only", variable=self.jobspy_remote).grid(
             row=3, column=1, sticky="w", pady=(8, 0))
+        ttk.Label(f, text="Posted within hours (0 = any)").grid(
+            row=3, column=2, sticky="w", padx=(18, 0), pady=(8, 0))
+        self.jobspy_hours = tk.IntVar(value=0)
+        ttk.Spinbox(f, from_=0, to=720, increment=24, textvariable=self.jobspy_hours,
+                    width=5).grid(row=3, column=3, sticky="w", padx=6, pady=(8, 0))
 
         hint = ttk.Label(f, foreground="#666", wraplength=680, justify="left",
                          text="Searches LinkedIn / Indeed / Glassdoor / ZipRecruiter by keyword "
@@ -1040,10 +1330,12 @@ class App(tk.Tk):
             return
         pages = self.jobspy_pages.get()
         remote = self.jobspy_remote.get()
+        hours = self.jobspy_hours.get()
 
         def task(w: Worker) -> None:
             try:
-                provider = JobSpyProvider(site_name=sites, country_indeed=country)
+                provider = JobSpyProvider(site_name=sites, country_indeed=country,
+                                          hours_old=hours or None)
             except SystemExit as exc:
                 w.log(str(exc))
                 return
@@ -1060,6 +1352,338 @@ class App(tk.Tk):
             w.log(f"{len(jobs)} returned, {new} new")
 
         self.start(f"JobSpy · {query}", task)
+
+    # ---------------- tab: US & Asia ----------------
+
+    def _need_keys(self, source: str, names: tuple[str, ...]) -> bool:
+        """True if every key is set; otherwise offer to open the API keys dialog."""
+        missing = [n for n in names if not os.environ.get(n)]
+        if not missing:
+            return True
+        if messagebox.askyesno(
+                "API key needed",
+                f"{source} needs {', '.join(missing)}.\n\nOpen the API keys window to add it?"):
+            self._open_api_keys()
+        return False
+
+    def _store_us_asia(self, jobs: list[Job], w: Worker, strict: bool) -> None:
+        """Same filter as the us_asia_jobs.py commands: robotics/mechatronics
+        roles, no senior titles, and with strict only explicit entry level."""
+        new = kept = 0
+        for job in jobs:
+            ok, _ = us_asia_keep(job, strict)
+            if not ok:
+                continue
+            kept += 1
+            if self.store.upsert(job):
+                new += 1
+                w.found(job)
+        w.log(f"{len(jobs)} returned · {kept} passed the robotics filter · {new} new")
+
+    def _panel_usajobs(self, f) -> None:
+        ttk.Label(f, text="Field").grid(row=0, column=0, sticky="w", pady=3)
+        self.usa_field = ttk.Combobox(f, width=28, values=[
+            "robotics", "mechatronics", "mechanical engineer", "electrical engineer",
+            "controls engineer", "computer engineer"])
+        self.usa_field.set("robotics")
+        self.usa_field.grid(row=0, column=1, sticky="w", padx=6)
+        ttk.Label(f, text="Location").grid(row=0, column=2, sticky="w", padx=(18, 0))
+        self.usa_location = ttk.Entry(f, width=20)
+        self.usa_location.grid(row=0, column=3, sticky="w", padx=6)
+
+        ttk.Label(f, text="Pages (100 each)").grid(row=1, column=0, sticky="w", pady=3)
+        self.usa_pages = tk.IntVar(value=2)
+        ttk.Spinbox(f, from_=1, to=10, textvariable=self.usa_pages, width=5).grid(
+            row=1, column=1, sticky="w", padx=6)
+        self.usa_all_grades = tk.BooleanVar(value=False)
+        ttk.Checkbutton(f, text="All pay grades (default: GS 05-12, where graduate roles sit)",
+                        variable=self.usa_all_grades).grid(row=1, column=2, columnspan=2,
+                                                           sticky="w", padx=(18, 0))
+        ttk.Label(f, foreground="#555", wraplength=720, justify="left",
+                  text="US federal jobs from the official USAJOBS API. Needs a free key and the "
+                       "email you registered it with (API keys… in the status bar). Most federal "
+                       "robotics work (NASA, Navy labs, DoE) is ITAR-restricted to US citizens "
+                       "or permanent residents.").grid(
+            row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        ttk.Button(f, text="Search USAJOBS", style="Run.TButton",
+                   command=self.run_usajobs).grid(row=3, column=1, sticky="w", pady=(12, 0))
+
+    def run_usajobs(self) -> None:
+        if not self._need_keys("USAJOBS", ("USAJOBS_API_KEY", "USAJOBS_EMAIL")):
+            return
+        field = self.usa_field.get().strip() or "robotics"
+        location = self.usa_location.get().strip()
+        pages = self.usa_pages.get()
+        entry_level = not self.usa_all_grades.get()
+
+        def task(w: Worker) -> None:
+            try:
+                jobs = USAJobsProvider().search(field, pages, location, entry_level, on_log=w.log)
+            except SystemExit as exc:
+                w.log(str(exc))
+                return
+            except Exception as exc:
+                w.log(f"USAJOBS FAILED: {exc}")
+                return
+            self._store_us_asia(jobs, w, strict=False)
+
+        self.start(f"USAJOBS · {field}", task)
+
+    ADZUNA_COUNTRIES = AdzunaProvider.US_ASIA
+
+    def _panel_adzuna(self, f) -> None:
+        ttk.Label(f, text="Search").grid(row=0, column=0, sticky="w", pady=3)
+        self.adz_field = ttk.Combobox(f, width=28, values=[
+            "mechatronics engineer", "robotics engineer", "graduate engineer trainee",
+            "automation engineer", "controls engineer"])
+        self.adz_field.set("mechatronics engineer")
+        self.adz_field.grid(row=0, column=1, sticky="w", padx=6)
+        ttk.Label(f, text="Country").grid(row=0, column=2, sticky="w", padx=(18, 0))
+        self.adz_country = ttk.Combobox(
+            f, width=18, state="readonly",
+            values=[f"{c} · {n}" for c, n in self.ADZUNA_COUNTRIES.items()])
+        self.adz_country.set("us · United States")
+        self.adz_country.grid(row=0, column=3, sticky="w", padx=6)
+
+        ttk.Label(f, text="Pages (50 each)").grid(row=1, column=0, sticky="w", pady=3)
+        self.adz_pages = tk.IntVar(value=2)
+        ttk.Spinbox(f, from_=1, to=10, textvariable=self.adz_pages, width=5).grid(
+            row=1, column=1, sticky="w", padx=6)
+        ttk.Label(f, text="Posted within days").grid(row=1, column=2, sticky="w", padx=(18, 0))
+        self.adz_days = tk.IntVar(value=30)
+        ttk.Spinbox(f, from_=1, to=90, textvariable=self.adz_days, width=5).grid(
+            row=1, column=3, sticky="w", padx=6)
+        self.adz_strict = tk.BooleanVar(value=False)
+        ttk.Checkbutton(f, text="Only explicit graduate / junior / entry-level roles",
+                        variable=self.adz_strict).grid(row=2, column=1, columnspan=3,
+                                                       sticky="w", pady=4)
+        ttk.Label(f, foreground="#555", wraplength=720, justify="left",
+                  text="Job aggregator covering the US, India, Singapore, Australia and New "
+                       "Zealand. Needs a free app ID and key (API keys… in the status bar).").grid(
+            row=3, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        ttk.Button(f, text="Search Adzuna", style="Run.TButton",
+                   command=self.run_adzuna).grid(row=4, column=1, sticky="w", pady=(12, 0))
+
+    def run_adzuna(self) -> None:
+        if not self._need_keys("Adzuna", ("ADZUNA_APP_ID", "ADZUNA_APP_KEY")):
+            return
+        field = self.adz_field.get().strip() or "mechatronics engineer"
+        country = self.adz_country.get().split(" ", 1)[0]
+        pages = self.adz_pages.get()
+        days = self.adz_days.get()
+        strict = self.adz_strict.get()
+
+        def task(w: Worker) -> None:
+            try:
+                jobs = AdzunaProvider().search(field, country, pages, max_days_old=days,
+                                               on_log=w.log)
+            except SystemExit as exc:
+                w.log(str(exc))
+                return
+            except Exception as exc:
+                w.log(f"Adzuna FAILED: {exc}")
+                return
+            self._store_us_asia(jobs, w, strict)
+
+        self.start(f"Adzuna {country.upper()} · {field}", task)
+
+    def _panel_mcf(self, f) -> None:
+        ttk.Label(f, text="Search").grid(row=0, column=0, sticky="w", pady=3)
+        self.mcf_field = ttk.Combobox(f, width=28, values=[
+            "robotics", "mechatronics", "automation engineer", "graduate engineer"])
+        self.mcf_field.set("robotics")
+        self.mcf_field.grid(row=0, column=1, sticky="w", padx=6)
+        ttk.Label(f, text="Pages (100 each)").grid(row=0, column=2, sticky="w", padx=(18, 0))
+        self.mcf_pages = tk.IntVar(value=2)
+        ttk.Spinbox(f, from_=1, to=10, textvariable=self.mcf_pages, width=5).grid(
+            row=0, column=3, sticky="w", padx=6)
+        self.mcf_strict = tk.BooleanVar(value=False)
+        ttk.Checkbutton(f, text="Only explicit graduate / junior / entry-level roles",
+                        variable=self.mcf_strict).grid(row=1, column=1, columnspan=3,
+                                                       sticky="w", pady=4)
+        ttk.Label(f, foreground="#555", wraplength=720, justify="left",
+                  text="Singapore's national job portal. No key needed, and every listing "
+                       "shows a salary range. Its search service is unofficial and has moved "
+                       "before, so if it stops answering, the activity log says which "
+                       "addresses were tried.").grid(
+            row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        ttk.Button(f, text="Search MyCareersFuture", style="Run.TButton",
+                   command=self.run_mcf).grid(row=3, column=1, sticky="w", pady=(12, 0))
+
+    def run_mcf(self) -> None:
+        field = self.mcf_field.get().strip() or "robotics"
+        pages = self.mcf_pages.get()
+        strict = self.mcf_strict.get()
+
+        def task(w: Worker) -> None:
+            try:
+                jobs = MyCareersFutureProvider().search(field, pages, on_log=w.log)
+            except Exception as exc:
+                w.log(f"MyCareersFuture FAILED: {exc}")
+                return
+            self._store_us_asia(jobs, w, strict)
+
+        self.start(f"MyCareersFuture · {field}", task)
+
+    def _panel_markets(self, f) -> None:
+        text = tk.Text(f, height=12, wrap="word", font=("TkDefaultFont", 9),
+                       relief="flat", background=self.cget("background"))
+        sb = ttk.Scrollbar(f, orient="vertical", command=text.yview)
+        text.configure(yscrollcommand=sb.set)
+        text.pack(side="left", fill="both", expand=True)
+        sb.pack(side="left", fill="y")
+        text.tag_configure("h", font=("TkDefaultFont", 10, "bold"))
+        text.insert("end", "US and Asia-Pacific employer boards: Graduate & PhD → Graduate "
+                           "employer boards → Region.\n\n")
+        for r in US_ASIA_REGIONS.values():
+            text.insert("end", f"{r.name}\n", "h")
+            text.insert("end", f"Entry-level terms: {', '.join(r.grad_terms[:5])}\n")
+            if r.note:
+                text.insert("end", f"{r.note}\n")
+            text.insert("end", "\n")
+        text.insert("end", "European markets (EURES)\n", "h")
+        for code, m in sorted(MARKETS.items()):
+            text.insert("end", f"{code} {m.name}: {', '.join(m.cities[:4])}"
+                               + (f". {m.note}" if m.note else "") + "\n")
+        text.configure(state="disabled")
+
+    # ---------------- tab: unit tests ----------------
+
+    def _tab_tests(self) -> None:
+        tab = ttk.Frame(self.tabs, padding=(10, 8))
+        self.tabs.add(tab, text="  Unit tests  ")
+
+        bar = ttk.Frame(tab)
+        bar.pack(fill="x")
+        ttk.Button(bar, text="Run all checks", style="Run.TButton",
+                   command=lambda: self.run_checks(system_checks.GROUPS)).pack(side="left")
+        for group in system_checks.GROUPS:
+            ttk.Button(bar, text=f"{group} only",
+                       command=lambda g=group: self.run_checks((g,))).pack(side="left", padx=(6, 0))
+        ttk.Button(bar, text="Copy report", command=self._copy_checks).pack(side="right")
+        self.tests_summary = tk.StringVar(
+            value="Checks that every job source answers, LM Studio has the CV models, and "
+                  "this PC can run them. Nothing is changed or stored.")
+        ttk.Label(tab, textvariable=self.tests_summary, foreground="#555").pack(
+            anchor="w", pady=(6, 4))
+
+        wrap = ttk.Frame(tab)
+        wrap.pack(fill="both", expand=True)
+        cols = ("group", "check", "result", "detail", "time")
+        self.tests_tree = ttk.Treeview(wrap, columns=cols, show="headings", height=10,
+                                       selectmode="browse")
+        for c, wd in zip(cols, (80, 250, 60, 560, 50)):
+            self.tests_tree.heading(c, text=c.title())
+            self.tests_tree.column(c, width=wd, anchor="w", stretch=c == "detail")
+        sb = ttk.Scrollbar(wrap, orient="vertical", command=self.tests_tree.yview)
+        self.tests_tree.configure(yscrollcommand=sb.set)
+        self.tests_tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="left", fill="y")
+        for status, colour in (("pass", "#0b6b2e"), ("warn", "#9a6700"),
+                               ("fail", "#b00020"), ("skip", "#777777")):
+            self.tests_tree.tag_configure(status, foreground=colour)
+        self.tests_detail = tk.StringVar(value="")
+        ttk.Label(tab, textvariable=self.tests_detail, foreground="#333", wraplength=1000,
+                  justify="left").pack(anchor="w", pady=(4, 0))
+        self.tests_tree.bind("<<TreeviewSelect>>", self._on_check_select)
+        self._check_results: dict[str, system_checks.Result] = {}
+
+    def _on_check_select(self, _e=None) -> None:
+        sel = self.tests_tree.selection()
+        r = self._check_results.get(sel[0]) if sel else None
+        if r:
+            self.tests_detail.set(f"{r.name}: {r.detail}")
+
+    def _add_check_result(self, r: "system_checks.Result") -> None:
+        iid = f"{r.group}/{r.name}"
+        self._check_results[iid] = r
+        mark = {"pass": "✓ pass", "warn": "! warn", "fail": "✗ fail", "skip": "– skip"}[r.status]
+        self.tests_tree.insert("", "end", iid=iid, tags=(r.status,),
+                               values=(r.group, r.name, mark, r.detail, f"{r.seconds:.1f}s"))
+        counts: dict[str, int] = {}
+        for x in self._check_results.values():
+            counts[x.status] = counts.get(x.status, 0) + 1
+        self.tests_summary.set("   ".join(f"{counts[s]} {s}" for s in
+                                          ("pass", "warn", "fail", "skip") if counts.get(s)))
+
+    def run_checks(self, groups) -> None:
+        if self.worker and self.worker.is_alive():
+            messagebox.showinfo("Busy", "Something is already running. Wait for it to finish.")
+            return
+        self.tests_tree.delete(*self.tests_tree.get_children())
+        self._check_results.clear()
+        self.tests_detail.set("")
+        self.tests_summary.set("Running… API checks take up to a minute.")
+        base_url = self.ats_base_url.get().strip() or DEFAULT_BASE_URL
+        sec_email = self.radar_email.get().strip()
+
+        def task(w: Worker) -> None:
+            results = system_checks.run(
+                groups, cancelled=w.cancelled, base_url=base_url, sec_email=sec_email,
+                on_result=lambda r: self._ui(lambda r=r: self._add_check_result(r)))
+            bad = [r for r in results if r.status in ("fail", "warn")]
+            w.log(f"checks: {len(results)} run, "
+                  f"{sum(r.status == 'fail' for r in results)} failed, "
+                  f"{sum(r.status == 'warn' for r in results)} warnings")
+            for r in bad:
+                w.log(f"  {r.status.upper()} {r.group} · {r.name}: {r.detail}")
+
+        self.start(f"Checks · {', '.join(groups)}", task)
+
+    def _copy_checks(self) -> None:
+        if not self._check_results:
+            messagebox.showinfo("Nothing to copy", "Run the checks first.")
+            return
+        lines = [f"EU Job Search checks, {datetime.now():%Y-%m-%d %H:%M}"]
+        lines += [f"{r.status.upper():4}  {r.group:9}  {r.name}: {r.detail}"
+                  for r in self._check_results.values()]
+        self.clipboard_clear()
+        self.clipboard_append("\n".join(lines))
+        self.log(f"copied {len(self._check_results)} check results to the clipboard")
+
+    # ---------------- API keys ----------------
+
+    def _open_api_keys(self) -> None:
+        dlg = getattr(self, "_keys_dlg", None)
+        if dlg is not None and dlg.winfo_exists():
+            dlg.lift()
+            return
+        dlg = tk.Toplevel(self)
+        dlg.title("API keys")
+        dlg.transient(self)
+        self._keys_dlg = dlg
+        f = ttk.Frame(dlg, padding=12)
+        f.pack(fill="both", expand=True)
+        entries: dict[str, ttk.Entry] = {}
+        for i, (name, label, url) in enumerate(API_KEYS):
+            ttk.Label(f, text=label).grid(row=i, column=0, sticky="w", pady=2)
+            e = ttk.Entry(f, width=44, show="" if name == "USAJOBS_EMAIL" else "•")
+            e.insert(0, os.environ.get(name, ""))
+            e.grid(row=i, column=1, sticky="w", padx=6, pady=2)
+            entries[name] = e
+            if url:
+                link = ttk.Label(f, text="get one", foreground="#3b6ea5", cursor="hand2")
+                link.grid(row=i, column=2, sticky="w")
+                link.bind("<Button-1>", lambda _e, u=url: webbrowser.open(u))
+        ttk.Label(f, foreground="#555", wraplength=460, justify="left",
+                  text=f"Saved unencrypted in {_settings_path()}. Keys typed here override "
+                       "environment variables of the same name. Leave a field empty to "
+                       "remove the key.").grid(
+            row=len(API_KEYS), column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+        def save() -> None:
+            try:
+                save_api_keys({n: e.get().strip() for n, e in entries.items()})
+            except OSError as exc:
+                messagebox.showerror("Could not save", str(exc), parent=dlg)
+                return
+            self.log(f"API keys saved → {_settings_path()}")
+            dlg.destroy()
+
+        btns = ttk.Frame(f)
+        btns.grid(row=len(API_KEYS) + 1, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        ttk.Button(btns, text="Save", style="Run.TButton", command=save).pack(side="right")
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="right", padx=6)
 
     # ---------------- tab: company radar ----------------
 
@@ -1080,9 +1704,28 @@ class App(tk.Tk):
         ttk.Spinbox(f, from_=1, to=24, textvariable=self.radar_months, width=5).grid(
             row=0, column=3, sticky="w", padx=6)
         ttk.Label(f, text="months").grid(row=0, column=4, sticky="w")
+        ttk.Label(f, text="SEC contact email").grid(row=0, column=5, sticky="w", padx=(18, 0))
+        self.radar_email = ttk.Entry(f, width=26)
+        self.radar_email.insert(0, _load_settings().get("sec_email", ""))
+        self.radar_email.grid(row=0, column=6, sticky="w", padx=6)
+
+        row1 = ttk.Frame(f)
+        row1.grid(row=1, column=0, columnspan=7, sticky="w", pady=(6, 0))
+        ttk.Label(row1, text="New employers: jobs from the last").pack(side="left")
+        self.radar_days = tk.IntVar(value=90)
+        ttk.Spinbox(row1, from_=1, to=365, textvariable=self.radar_days, width=5).pack(
+            side="left", padx=4)
+        ttk.Label(row1, text="days, with at least").pack(side="left")
+        self.radar_min_roles = tk.IntVar(value=1)
+        ttk.Spinbox(row1, from_=1, to=20, textvariable=self.radar_min_roles, width=4).pack(
+            side="left", padx=4)
+        ttk.Label(row1, text="role(s)").pack(side="left")
+        ttk.Label(row1, text="Probe these names").pack(side="left", padx=(18, 4))
+        self.radar_probe_names = ttk.Entry(row1, width=30)
+        self.radar_probe_names.pack(side="left")
 
         btns = ttk.Frame(f)
-        btns.grid(row=1, column=0, columnspan=5, sticky="w", pady=(12, 0))
+        btns.grid(row=2, column=0, columnspan=7, sticky="w", pady=(10, 0))
         ttk.Button(btns, text="1 · US funding (SEC Form D)", style="Run.TButton",
                    command=self.run_funding).pack(side="left", padx=(0, 8))
         ttk.Button(btns, text="2 · New employers in my results",
@@ -1092,13 +1735,16 @@ class App(tk.Tk):
 
         ttk.Label(f, foreground="#555", wraplength=680, justify="left",
                   text=("Form D is the notice every US company files when it raises private "
-                        "capital — official, keyless SEC data. 'New employers' scans the jobs "
-                        "you've already collected for companies not on the monitored list, which "
-                        "works for every market. 'Probe' checks each one for a live job board.")
-                  ).grid(row=2, column=0, columnspan=5, sticky="w", pady=(10, 0))
+                        "capital — official, keyless SEC data. Leave Field empty to scan all the "
+                        "standard robotics terms. The SEC asks for a contact email with each "
+                        "request. 'New employers' scans the jobs you've already collected for "
+                        "companies not on the monitored list, which works for every market. "
+                        "'Probe' checks the names you typed, or else every tracked company "
+                        "without a board, for a live job board.")
+                  ).grid(row=3, column=0, columnspan=7, sticky="w", pady=(10, 0))
 
         wrap = ttk.Frame(f)
-        wrap.grid(row=3, column=0, columnspan=5, sticky="nsew", pady=(10, 0))
+        wrap.grid(row=4, column=0, columnspan=7, sticky="nsew", pady=(10, 0))
         cols = ("name", "market", "signal", "detail", "board")
         self.radar_tree = ttk.Treeview(wrap, columns=cols, show="headings", height=9)
         for c, wd in zip(cols, (230, 60, 80, 270, 150)):
@@ -1111,14 +1757,47 @@ class App(tk.Tk):
         self.radar_tree.bind("<Double-1>", lambda _e: self.open_radar_row())
         self.radar_tree.tag_configure("hiring", background="#eef7ee")
 
-        ttk.Button(f, text="Export watchlist CSV",
-                   command=self.export_radar).grid(row=4, column=0, sticky="w", pady=(8, 0))
+        bottom = ttk.Frame(f)
+        bottom.grid(row=5, column=0, columnspan=7, sticky="w", pady=(8, 0))
+        ttk.Button(bottom, text="Export watchlist CSV",
+                   command=self.export_radar).pack(side="left")
+        ttk.Button(bottom, text="Copy board entries",
+                   command=self.copy_radar_boards).pack(side="left", padx=6)
+        ttk.Label(bottom, text="Show").pack(side="left", padx=(18, 4))
+        self.radar_signal = ttk.Combobox(bottom, width=10, state="readonly",
+                                         values=["all", "funding", "emerging", "probe"])
+        self.radar_signal.set("all")
+        self.radar_signal.pack(side="left")
+        self.radar_signal.bind("<<ComboboxSelected>>", lambda _e: self.load_radar())
+        self.radar_summary = tk.StringVar(value="")
+        ttk.Label(bottom, textvariable=self.radar_summary, foreground="#555").pack(
+            side="left", padx=12)
         self.load_radar()
+
+    def copy_radar_boards(self) -> None:
+        """What the command-line watchlist prints: Board(...) lines for companies
+        with a live board, ready to paste into BOARDS in robotics_track.py."""
+        rows = [r for r in self.radar_rows.values() if r["ats"]]
+        if not rows:
+            messagebox.showinfo("No boards yet",
+                                "No tracked company has a known job board. Run 'Probe' first.")
+            return
+        text = "\n".join(f'    Board("{r["name"]}", "{r["ats"]}", "{r["ats_slug"]}", '
+                         f'"{r["market"]}", "robotics"),' for r in rows)
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.log(f"copied {len(rows)} Board(...) entries — paste them into BOARDS in "
+                 "robotics_track.py to monitor these companies permanently")
 
     def load_radar(self) -> None:
         self.radar_tree.delete(*self.radar_tree.get_children())
         self.radar_rows = {}
-        for r in self.radar.all():
+        signal = self.radar_signal.get() if hasattr(self, "radar_signal") else "all"
+        rows = self.radar.all("" if signal == "all" else signal)
+        if hasattr(self, "radar_summary"):
+            boards = sum(1 for r in rows if r["ats"])
+            self.radar_summary.set(f"{len(rows)} companies · {boards} with a live job board")
+        for r in rows:
             board = f"{r['ats']}:{r['ats_slug']}" if r["ats"] else ""
             self.radar_rows[r["key"]] = dict(r)
             self.radar_tree.insert("", "end", iid=r["key"],
@@ -1150,28 +1829,44 @@ class App(tk.Tk):
         self.log(f"exported {len(rows)} companies -> {path}")
 
     def run_funding(self) -> None:
-        field = self.radar_field.get().strip() or "robotics"
+        field = self.radar_field.get().strip()
+        # Empty field: the same standard terms the command line scans
+        fields = [field] if field else list(FUNDING_KEYWORDS[:6])
         months = self.radar_months.get()
+        email = self.radar_email.get().strip()
+        if email != _load_settings().get("sec_email", ""):
+            settings = _load_settings()
+            settings["sec_email"] = email
+            try:
+                _settings_path().write_text(json.dumps(settings, indent=2), encoding="utf-8")
+            except OSError:
+                pass
 
         def task(w: Worker) -> None:
-            scanner = FormDScanner()
-            try:
-                found = scanner.scan(field, months, on_log=w.log)
-            except Exception as exc:
-                w.log(f"SEC scan FAILED: {exc}")
-                return
+            scanner = FormDScanner(email)
+            found = []
+            for fld in fields:
+                if w.cancelled.is_set():
+                    break
+                try:
+                    found += scanner.scan(fld, months, on_log=w.log)
+                except Exception as exc:
+                    w.log(f"SEC scan '{fld}' FAILED: {exc}")
             new = sum(1 for c in found if self.radar.upsert(c))
             w.log(f"{len(found)} filings matched, {new} companies new to the radar")
             if not found:
                 w.log("Nothing matched. Try a broader term or a longer look-back.")
             self._ui(self.load_radar)
 
-        self.start(f"SEC Form D · {field}", task)
+        self.start(f"SEC Form D · {field or 'all standard terms'}", task)
 
     def run_emerging(self) -> None:
+        days = self.radar_days.get()
+        min_roles = self.radar_min_roles.get()
+
         def task(w: Worker) -> None:
             try:
-                found = emerging_employers(DB, days=90, on_log=w.log)
+                found = emerging_employers(DB, days=days, min_roles=min_roles, on_log=w.log)
             except Exception as exc:
                 w.log(f"FAILED: {exc}")
                 return
@@ -1184,11 +1879,13 @@ class App(tk.Tk):
         self.start("New employers in collected jobs", task)
 
     def run_probe(self) -> None:
-        pending = [r["name"] for r in self.radar.all() if not r["ats"]][:30]
+        typed = [n.strip() for n in self.radar_probe_names.get().split(",") if n.strip()]
+        pending = typed or [r["name"] for r in self.radar.all() if not r["ats"]][:30]
         if not pending:
             messagebox.showinfo("Nothing to probe",
                                 "Every tracked company already has a board, or the "
-                                "radar is empty. Run step 1 or 2 first.")
+                                "radar is empty. Run step 1 or 2 first, or type company "
+                                "names under 'Probe these names'.")
             return
 
         def task(w: Worker) -> None:
@@ -1257,15 +1954,11 @@ class App(tk.Tk):
         ttk.Checkbutton(ctl, text="Compile PDF", variable=self.ats_compile).grid(
             row=0, column=4, **pad)
 
-        ttk.Label(ctl, text="Backend").grid(row=1, column=0, **pad)
-        self.ats_backend = tk.StringVar(value="lmstudio")
-        ttk.Combobox(ctl, textvariable=self.ats_backend, values=["anthropic", "lmstudio"],
-                     width=10, state="readonly").grid(row=1, column=1, padx=(4, 12), **pad)
-        ttk.Label(ctl, text="Model").grid(row=1, column=2, **pad)
+        ttk.Label(ctl, text="Model").grid(row=1, column=0, **pad)
         # the default pair; the pipeline loads it in LM Studio by itself
         self.ats_model = tk.StringVar(value=DEFAULT_LOCAL_MODELS)
-        ttk.Entry(ctl, textvariable=self.ats_model, width=20).grid(
-            row=1, column=3, columnspan=2, padx=4, **pad)
+        ttk.Entry(ctl, textvariable=self.ats_model, width=40).grid(
+            row=1, column=1, columnspan=4, padx=4, **pad)
         ttk.Button(ctl, text="Detect local", command=self._ats_detect).grid(
             row=1, column=5, **pad)
 
@@ -1308,6 +2001,8 @@ class App(tk.Tk):
                    command=self._ats_open_outputs).pack(side="left", padx=6)
         ttk.Button(bar, text="Clear JD",
                    command=lambda: self.ats_jd.delete("1.0", "end")).pack(side="left")
+        ttk.Button(bar, text="Fit score",
+                   command=self._ats_fit_score).pack(side="left", padx=6)
         self.ats_go = ttk.Button(bar, text="Generate",
                                   style="Run.TButton", command=self._ats_generate)
         self.ats_go.pack(side="right")
@@ -1415,7 +2110,6 @@ class App(tk.Tk):
             messagebox.showerror("No local server", str(e))
             return
         if models:
-            self.ats_backend.set("lmstudio")
             if not self.ats_model.get().strip():     # keep a model list already entered
                 self.ats_model.set(models[0])
             self.log(f"[ATS] Local models: {', '.join(models)}")
@@ -1447,10 +2141,28 @@ class App(tk.Tk):
             self.ats_jd.delete("1.0", "end")
             self.ats_jd.insert("1.0", text)
 
+    def _ats_fit_score(self) -> None:
+        """Score the pasted job description against the profile, like
+        `fit_score.py explain`, without adding anything to the job list."""
+        jd = self.ats_jd.get("1.0", "end").strip()
+        if not jd:
+            messagebox.showwarning("Missing input", "Paste a job description first.")
+            return
+        scorer = self.scorer or load_default_scorer()
+        if scorer is None:
+            messagebox.showerror("No profile", f"Could not read {default_profile_path()}")
+            return
+        fields = dict(re.findall(r"^(Position|Location):\s*(.+)$", jd, re.MULTILINE))
+        title = fields.get("Position") or next(l.strip() for l in jd.splitlines() if l.strip())
+        job = Job(job_id="fit-check", title=title, company="",
+                  location=fields.get("Location", ""), description=jd)
+        summary = scorer.explain(job).summary()
+        self.ats_result_var.set(f"Fit {summary}")
+        self.log(f"[fit] {title[:60]}: {summary}")
+
     def _ats_open_outputs(self) -> None:
         folder = getattr(self, "_ats_last_out", None) or (_data_dir() / "ats_outputs")
         Path(folder).mkdir(parents=True, exist_ok=True)
-        import os
         if os.name == "nt":
             os.startfile(str(folder))
         else:
@@ -1499,14 +2211,14 @@ class App(tk.Tk):
         loc = (job.location or "").upper()
         src = (job.source or "").lower()
         # source-based shortcut
-        if "usajobs" in src or "adzuna-us" in src:
+        # Adzuna stores "adzuna:us"; accept "adzuna-us" too
+        adzuna = re.match(r"adzuna[:-](\w+)", src)
+        if "usajobs" in src or (adzuna and adzuna.group(1) == "us"):
             return "US"
-        if "mcf" in src or "adzuna-sg" in src:
+        if "mcf" in src or (adzuna and adzuna.group(1) in ("sg", "in", "au", "nz")):
             return "ASIA"
-        if "adzuna-in" in src:
-            return "ASIA"
-        if "adzuna-jp" in src:
-            return "JP"
+        if adzuna and adzuna.group(1) in ADZUNA_EUROPE:
+            return {"de": "DE", "at": "DE", "ch": "DE", "gb": "UK"}.get(adzuna.group(1), "EU")
         # location-based, whole words only: "AT" once matched inside "GREATER" and
         # "IT" inside "METROPOLITAN" ("Greater Munich Metropolitan Area")
         for token, code in self._ATS_REGION_MAP.items():
@@ -1545,7 +2257,6 @@ class App(tk.Tk):
 
         region    = self.ats_region.get()
         style     = self.ats_style.get()
-        backend   = self.ats_backend.get()
         model     = self.ats_model.get().strip()
         recruiter = self.ats_recruiter.get().strip()
         notes     = self.ats_notes.get("1.0", "end").strip()
@@ -1557,7 +2268,7 @@ class App(tk.Tk):
 
         def task(w: Worker) -> None:
             try:
-                w.log(f"[ATS] Region={region}  Backend={backend}  Style={style}")
+                w.log(f"[ATS] Region={region}  Style={style}")
                 pkg, out = ats_run(
                     jd, region,
                     profile_path=Path(profile_path),
@@ -1565,10 +2276,7 @@ class App(tk.Tk):
                     style=style,
                     recruiter=recruiter,
                     notes=notes,
-                    # the local pair in the field is not a Claude model name
-                    model=(DEFAULT_MODEL if backend == "anthropic" and
-                           (not model or model == DEFAULT_LOCAL_MODELS) else model),
-                    backend=backend,
+                    model=model,
                     base_url=base_url,
                     compile_pdf=compile_,
                     cover=cover,
@@ -1659,6 +2367,7 @@ class App(tk.Tk):
         ttk.Button(bar, text="Export", command=self.export).pack(side="left", padx=4)
         ttk.Button(bar, text="Reload", command=self.load_saved).pack(side="left", padx=4)
         ttk.Button(bar, text="Re-score", command=self.rescore_all).pack(side="left", padx=4)
+        ttk.Button(bar, text="Summary", command=self.show_summary).pack(side="left", padx=4)
         ttk.Button(bar, text="Clear untracked", command=self.clear_db).pack(side="right")
 
         wrap = ttk.Frame(parent)
@@ -1745,13 +2454,14 @@ class App(tk.Tk):
 
     def _statusbar(self, parent) -> None:
         bar = ttk.Frame(parent)
-        bar.pack(fill="x", pady=(6, 0))
+        bar.pack(side="bottom", fill="x", pady=(6, 0))
         self.status = tk.StringVar(value="Ready")
         ttk.Label(bar, textvariable=self.status).pack(side="left")
         self.progress = ttk.Progressbar(bar, mode="indeterminate", length=180)
         self.progress.pack(side="right")
         self.cancel_btn = ttk.Button(bar, text="Stop", command=self.cancel, state="disabled")
         self.cancel_btn.pack(side="right", padx=8)
+        ttk.Button(bar, text="API keys…", command=self._open_api_keys).pack(side="right")
 
     # ---------------- plumbing ----------------
 
@@ -1825,6 +2535,7 @@ class App(tk.Tk):
         field = self.phd_field.get().strip() or "robotics"
         pages = self.phd_pages.get()
         funded = self.phd_funded.get()
+        max_terms = self.phd_max_terms.get()
 
         def task(w: Worker) -> None:
             provider = PhdProvider()
@@ -1834,7 +2545,7 @@ class App(tk.Tk):
             for code in codes:
                 if w.cancelled.is_set():
                     return
-                for term in PHD_TERMS.get(code, ("PhD position",))[:3]:
+                for term in PHD_TERMS.get(code, ("PhD position",))[:max_terms]:
                     if w.cancelled.is_set():
                         return
                     query = f"{term} {field}"
@@ -1909,6 +2620,9 @@ class App(tk.Tk):
         field = self.stu_field.get().strip()
         kind = self.stu_kind.get()
         kinds = list(KINDS) if kind == "(all)" else [kind]
+        pages = self.stu_pages.get()
+        max_terms = self.stu_max_terms.get()
+        strict = self.stu_strict.get()
 
         def task(w: Worker) -> None:
             provider = EuresProvider()
@@ -1925,17 +2639,17 @@ class App(tk.Tk):
                 terms: list[str] = []
                 for k in kinds:
                     terms.extend(getattr(market, attr[k]))
-                for term in terms[:6]:
+                for term in terms[:max_terms]:
                     if w.cancelled.is_set():
                         return
                     query = f"{term} {field}".strip()
                     try:
-                        # Internships also get the structured offering-code filter.
-                        client = intern if "internship" in kinds and len(kinds) == 1 else provider
-                        if client is intern:
-                            jobs = client.search_intern(query, code, 1, on_log=w.log)
+                        if "internship" in kinds and len(kinds) == 1:
+                            # Internships also get the structured offering-code filter.
+                            jobs = intern.search_intern(query, code, pages, on_log=w.log)
                         else:
-                            jobs = client.search(query, "", 1, False, country=code, on_log=w.log)
+                            jobs = provider.search(query, "", pages, False, country=code,
+                                                   on_log=w.log)
                     except Exception as exc:
                         w.log(f"  {code} '{query}' FAILED: {exc}")
                         continue
@@ -1945,6 +2659,8 @@ class App(tk.Tk):
                         if not ok:
                             continue
                         label = classify(job, market)
+                        if strict and label is None:
+                            continue
                         job.employment_type = label or job.employment_type
                         kept += 1
                         if self.store.upsert(job):
@@ -2047,6 +2763,43 @@ class App(tk.Tk):
         n = rescore(self.store, self.scorer)
         self.log(f"re-scored {n} jobs against {default_profile_path()}")
         self.load_saved()
+
+    def show_summary(self) -> None:
+        """The app's version of the command-line report / stats commands."""
+        rows = self.store.all()
+        if not rows:
+            self.log("summary: nothing stored yet")
+            return
+
+        def top(counts: dict[str, int], n: int = 10) -> str:
+            return ", ".join(f"{k} {v}" for k, v in
+                             sorted(counts.items(), key=lambda x: -x[1])[:n])
+
+        by_source: dict[str, int] = {}
+        by_type: dict[str, int] = {}
+        by_market: dict[str, int] = {}
+        by_company: dict[str, int] = {}
+        remote = 0
+        for r in rows:
+            src = (r["source"] or "?").split(":")[0]
+            by_source[src] = by_source.get(src, 0) + 1
+            kind = r["employment_type"] or "other"
+            by_type[kind] = by_type.get(kind, 0) + 1
+            if r["company"]:
+                by_company[r["company"]] = by_company.get(r["company"], 0) + 1
+            remote += bool(r["remote"])
+            loc = (r["location"] or "").lower()
+            for code, m in MARKETS.items():
+                if m.name.lower() in loc or any(c.lower() in loc for c in m.cities):
+                    by_market[m.name] = by_market.get(m.name, 0) + 1
+                    break
+        tracked = sum(1 for r in rows if r["status"])
+        self.log(f"summary: {len(rows)} roles stored · {tracked} tracked · {remote} remote")
+        self.log(f"  by source:  {top(by_source)}")
+        self.log(f"  by type:    {top(by_type)}")
+        if by_market:
+            self.log(f"  by market:  {top(by_market)}")
+        self.log(f"  top companies: {top(by_company)}")
 
     def _on_result_double_click(self, event) -> None:
         """First double-click: pre-fill ATS tab. Ctrl+double-click: open URL."""

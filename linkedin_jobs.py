@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-linkedin_jobs.py — collect LinkedIn job postings through licensed job-data APIs.
+linkedin_jobs.py — the shared job model, SQLite store and HTTP helpers that
+every source module builds on, plus export and stats for the stored jobs.
 
-Providers are pluggable. Set the API key for whichever you use:
-    export JSEARCH_API_KEY=...     # RapidAPI "JSearch"
-    export APIFY_TOKEN=...         # Apify LinkedIn Jobs actor
+LinkedIn and Indeed themselves are searched through JobSpy (jobspy_provider.py);
+the paid LinkedIn APIs this module used to wrap have been removed.
 
 Usage:
-    python linkedin_jobs.py search "python developer" --location "Berlin" --pages 3
-    python linkedin_jobs.py search "data engineer" --provider apify --remote
     python linkedin_jobs.py export jobs.csv
     python linkedin_jobs.py stats
 
@@ -362,6 +360,28 @@ def data_dir() -> Path:
     return path
 
 
+def settings_path() -> Path:
+    """settings.json in the data folder: remembered profile, API keys, SEC email."""
+    return data_dir() / "settings.json"
+
+
+def load_settings() -> dict:
+    try:
+        return json.loads(settings_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def apply_saved_api_keys() -> None:
+    """Copy API keys saved in the app into the environment, where the providers
+    read them. Called by the app and by the daily sweep, which the scheduled
+    task runs without the app. A key saved in the app wins over an environment
+    variable of the same name, being the more recent choice."""
+    for name, value in (load_settings().get("api_keys") or {}).items():
+        if value:
+            os.environ[name] = value
+
+
 # --------------------------------------------------------------------------
 # Rate limiting + retries
 # --------------------------------------------------------------------------
@@ -424,133 +444,13 @@ class Provider:
         raise NotImplementedError
 
 
-class JSearchProvider(Provider):
-    """RapidAPI JSearch — aggregates LinkedIn, Indeed, Glassdoor and others."""
-
-    name = "jsearch"
-    HOST = "jsearch.p.rapidapi.com"
-    URL = f"https://{HOST}/search"
-
-    def __init__(self, api_key: str | None = None, rpm: int = 20):
-        self.api_key = api_key or os.environ.get("JSEARCH_API_KEY")
-        if not self.api_key:
-            raise SystemExit("Set JSEARCH_API_KEY (get one at rapidapi.com/letscrape/api/jsearch)")
-        self.session = requests.Session()
-        self.session.headers.update(
-            {"X-RapidAPI-Key": self.api_key, "X-RapidAPI-Host": self.HOST}
-        )
-        self.limiter = RateLimiter(rpm)
-
-    def search(self, query, location, pages, remote) -> Iterator[Job]:
-        for page in range(1, pages + 1):
-            self.limiter.wait()
-            params = {
-                "query": f"{query} {location}".strip(),
-                "page": str(page),
-                "num_pages": "1",
-                "employer_website": "linkedin.com",
-            }
-            if remote:
-                params["remote_jobs_only"] = "true"
-            print(f"[jsearch] page {page}…", file=sys.stderr)
-            data = request_with_retry(self.session, "GET", self.URL, params=params).json()
-            rows = data.get("data") or []
-            if not rows:
-                break
-            for r in rows:
-                yield self._to_job(r)
-
-    @staticmethod
-    def _to_job(r: dict) -> Job:
-        loc = ", ".join(
-            x for x in (r.get("job_city"), r.get("job_state"), r.get("job_country")) if x
-        )
-        company = r.get("employer_name") or ""
-        title = r.get("job_title") or ""
-        return Job(
-            job_id=r.get("job_id") or Job.make_id(company, title, loc),
-            title=title,
-            company=company,
-            location=loc,
-            url=r.get("job_apply_link") or "",
-            posted_at=r.get("job_posted_at_datetime_utc") or "",
-            employment_type=r.get("job_employment_type") or "",
-            remote=bool(r.get("job_is_remote")),
-            salary_min=r.get("job_min_salary"),
-            salary_max=r.get("job_max_salary"),
-            salary_currency=r.get("job_salary_currency") or "",
-            description=(r.get("job_description") or "")[:4000],
-            source="jsearch",
-        )
-
-
-class ApifyProvider(Provider):
-    """Apify LinkedIn Jobs actor — runs synchronously and returns dataset items."""
-
-    name = "apify"
-    ACTOR = "bebity~linkedin-jobs-scraper"
-
-    def __init__(self, token: str | None = None):
-        self.token = token or os.environ.get("APIFY_TOKEN")
-        if not self.token:
-            raise SystemExit("Set APIFY_TOKEN (apify.com → Settings → Integrations)")
-        self.session = requests.Session()
-
-    def search(self, query, location, pages, remote) -> Iterator[Job]:
-        url = (
-            f"https://api.apify.com/v2/acts/{self.ACTOR}"
-            f"/run-sync-get-dataset-items?token={self.token}"
-        )
-        payload = {
-            "title": query,
-            "location": location,
-            "rows": pages * 25,
-            "workType": "2" if remote else "",
-        }
-        print("[apify] running actor (this can take a minute)…", file=sys.stderr)
-        items = request_with_retry(self.session, "POST", url, json=payload).json()
-        for r in items:
-            company = r.get("companyName") or ""
-            title = r.get("title") or ""
-            loc = r.get("location") or ""
-            yield Job(
-                job_id=str(r.get("id") or Job.make_id(company, title, loc)),
-                title=title,
-                company=company,
-                location=loc,
-                url=r.get("jobUrl") or r.get("link") or "",
-                posted_at=r.get("postedAt") or r.get("publishedAt") or "",
-                employment_type=r.get("contractType") or "",
-                remote=remote or "remote" in loc.lower(),
-                description=(r.get("description") or "")[:4000],
-                source="apify",
-            )
-
-
-PROVIDERS: dict[str, type[Provider]] = {
-    "jsearch": JSearchProvider,
-    "apify": ApifyProvider,
-}
+# Source modules register their providers here (eures, phd, jobspy, …).
+PROVIDERS: dict[str, type[Provider]] = {}
 
 
 # --------------------------------------------------------------------------
 # Commands
 # --------------------------------------------------------------------------
-
-def cmd_search(args) -> None:
-    provider = PROVIDERS[args.provider]()
-    store = Store(args.db)
-    new = seen = 0
-    try:
-        for job in provider.search(args.query, args.location, args.pages, args.remote):
-            seen += 1
-            if store.upsert(job):
-                new += 1
-                print(f"  + {job.title} — {job.company} ({job.location})")
-    except KeyboardInterrupt:
-        print("\ninterrupted", file=sys.stderr)
-    print(f"\n{seen} results, {new} new, saved to {args.db}")
-
 
 def cmd_export(args) -> None:
     rows = Store(args.db).all()
@@ -581,14 +481,6 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--db", default=DB_PATH)
     sub = p.add_subparsers(dest="cmd", required=True)
-
-    s = sub.add_parser("search", help="fetch postings")
-    s.add_argument("query")
-    s.add_argument("--location", default="")
-    s.add_argument("--pages", type=int, default=1)
-    s.add_argument("--remote", action="store_true")
-    s.add_argument("--provider", choices=list(PROVIDERS), default="jsearch")
-    s.set_defaults(func=cmd_search)
 
     e = sub.add_parser("export", help="dump to .csv or .json")
     e.add_argument("path")

@@ -36,7 +36,6 @@ import ats_plan as planning
 import ats_prompts as prompts
 from ats_regions import get_region
 
-ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 DEFAULT_BACKEND = os.environ.get("ATS_BACKEND", "lmstudio")
 DEFAULT_MODEL = os.environ.get("ATS_MODEL", "")          # LM Studio: use whatever is loaded
 # LM Studio's local server, and any other OpenAI-compatible server (Ollama, vLLM,
@@ -70,21 +69,6 @@ def _post(url: str, payload: dict, headers: dict, timeout: int) -> dict:
             f"Could not reach {url}: {e.reason}\n"
             "If you are using LM Studio, open it, load a model, go to the Developer "
             "tab and press Start Server.")
-
-
-def _call_anthropic(prompt, model, max_tokens, api_key, timeout):
-    api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        raise PipelineError(
-            "No Anthropic API key. This app defaults to LM Studio — make sure "
-            "LM Studio is running with a model loaded and the server started "
-            "(Developer tab -> Start Server).")
-    data = _post(ANTHROPIC_URL, {
-        "model": model, "max_tokens": max_tokens, "system": prompts.SYSTEM,
-        "messages": [{"role": "user", "content": prompt}],
-    }, {"x-api-key": api_key, "anthropic-version": "2023-06-01"}, timeout)
-    return "".join(b.get("text", "") for b in data.get("content", [])
-                   if b.get("type") == "text")
 
 
 # (token, log-probability) pairs of the last answer generated with logprobs=True.
@@ -245,19 +229,16 @@ def call_model(prompt: str, model: str = DEFAULT_MODEL, max_tokens: int = 1500,
                api_key: str = None, timeout: int = 600,
                backend: str = DEFAULT_BACKEND, base_url: str = None,
                schema: dict = None, temperature: float = 0.3, logprobs: bool = False) -> str:
-    """`schema` enforces JSON output on OpenAI-compatible servers; for the
-    Anthropic backend the prompt's own JSON instructions are relied on.
+    """Local models only: LM Studio, or another OpenAI-compatible server on
+    this machine. `schema` enforces JSON output.
     `temperature` 0 is for judgements (requirements, verification, fact-check):
     at 0.3 Bonsai answered "yes" for the ANSYS bullet in one run and "no" in the
     next."""
     backend = (backend or DEFAULT_BACKEND).lower()
-    if backend == "anthropic":
-        _LOGPROBS.value = []
-        return _call_anthropic(prompt, model, max_tokens, api_key, timeout)
     if backend in ("lmstudio", "openai", "local"):
         return _call_openai_compatible(prompt, model, max_tokens, api_key,
                                        timeout, base_url, schema, temperature, logprobs)
-    raise PipelineError(f"Unknown backend '{backend}'. Use anthropic or lmstudio.")
+    raise PipelineError(f"Unknown backend '{backend}'. Use lmstudio.")
 
 
 # --------------------------------------------------------------------- helpers
@@ -1430,10 +1411,10 @@ def prepare(job_description: str, region_code: str, profile_path: Path = None,
     # recruiter message); every listed model writes a cover-letter draft, in parallel.
     drafters = [m.strip() for m in (model or "").split(",") if m.strip()]
     model = drafters[0] if drafters else ""
-    if backend != "anthropic" and drafters:
+    if drafters:
         # named models are loaded with the right context; no lms commands to type
         ensure_models_loaded(drafters, base_url, log)
-    if backend != "anthropic" and not model:
+    if not model:
         model = _first_chat_model(base_url)
         if model:
             log(f"Using the loaded model: {model}")
@@ -1452,8 +1433,7 @@ def prepare(job_description: str, region_code: str, profile_path: Path = None,
     log(f"Document language: {prompts.LANGUAGE_NAMES[lang]}"
         + (f" (job ad is {prompts.LANGUAGE_NAMES.get(jd_lang, jd_lang)}; profile German level "
            "is below B2)" if jd_lang != lang else ""))
-    log(f"Backend: {backend}" + (f" @ {base_url or DEFAULT_BASE_URL}"
-                                 if backend != "anthropic" else f" ({model})"))
+    log(f"Backend: {backend} @ {base_url or DEFAULT_BASE_URL}")
 
     def call(prompt, max_tokens=max_tokens, schema=None, temperature=0.3, logprobs=False,
              use_model=None):

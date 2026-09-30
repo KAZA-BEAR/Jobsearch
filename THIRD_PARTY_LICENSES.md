@@ -87,5 +87,5 @@ them separately under their own terms:
 
 Job listings come from third-party APIs and websites, such as the Bundesagentur
 für Arbeit, EURES, EURAXESS, Personio, Workday, LinkedIn/Indeed via JobSpy,
-JSearch and Apify. Your use of each one is governed by that service's terms of
+USAJOBS, Adzuna, MyCareersFuture and SEC EDGAR. Your use of each one is governed by that service's terms of
 service. This license does not grant any rights to their data.

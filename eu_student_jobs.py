@@ -178,6 +178,78 @@ EXPERIENCE_DEMAND = re.compile(
     r"\b([5-9]|1\d)\+?\s*(years?|jahre|ans|años|jaar|lat)\b", re.IGNORECASE
 )
 
+# --------------------------------------------------------------------------
+# Adzuna in Europe (the provider itself is AdzunaProvider in us_asia_jobs.py)
+# --------------------------------------------------------------------------
+
+# Countries Adzuna serves in Europe; each answered a live search on 2026-09-30.
+ADZUNA_EUROPE = {
+    "de": "Germany", "at": "Austria", "ch": "Switzerland", "nl": "Netherlands",
+    "gb": "United Kingdom", "fr": "France", "be": "Belgium", "it": "Italy",
+    "es": "Spain", "pl": "Poland",
+}
+
+# Adzuna needs every word of `what` in a posting and matches whole words, so
+# "Werkstudent Mechatronik" found 6 jobs in Germany while "Werkstudent" plus any
+# of the field words (what_or) found 1,160 (2026-09-30). Defaults per country:
+# (role words, one search each; field words in the local language). With no role
+# the UK returned 100,306 matches, 3 of the first 50 student-level; "internship" 10.
+_DE_FIELD = "Mechatronik Robotik Automatisierung Regelungstechnik Embedded Elektrotechnik Maschinenbau"
+_EN_FIELD = "mechatronics robotics automation controls embedded robotic mechatronic"
+ADZUNA_EU_DEFAULTS = {
+    "de": (("Werkstudent", "Praktikum", "Masterarbeit"), _DE_FIELD),
+    "at": (("Praktikum", "Werkstudent", "Masterarbeit"), _DE_FIELD),
+    "ch": (("Praktikum", "Werkstudent", "Masterarbeit"), _DE_FIELD),
+    "nl": (("stage", "afstudeerstage"),
+           "mechatronica robotica automatisering besturingstechniek embedded werktuigbouwkunde"),
+    "gb": (("internship", "graduate", "placement"), _EN_FIELD),
+    "fr": (("stage",), "mécatronique robotique automatisme embarqué automatique"),
+    "be": (("internship",), _EN_FIELD + " mechatronica robotique"),
+    "it": (("tirocinio",), "meccatronica robotica automazione embedded"),
+    "es": (("prácticas",), "mecatrónica robótica automatización embebido"),
+    "pl": (("staż",), "mechatronika robotyka automatyka embedded"),
+}
+
+# The robotics filter elsewhere is English-only ("mechatronic" misses
+# "Mechatronik"), so Europe gets word stems in the local languages too.
+EU_FIELD_MARKERS = re.compile(
+    r"\b(?:mechatroni|mecatr[oó]ni|mécatroni|meccatroni|robot|rob[oó]tic|automati|"
+    r"automatyk|regelungstechn|steuerungstechn|embedded|firmware|elektrotechn|"
+    r"electrical engineer|mechanical engineer|maschinenbau|control (?:engineer|system)|"
+    r"motion control|kinemat|actuator|aktor|servo|perception|computer vision)"
+    r"|\b(?:sps|plc|ros2?)\b",
+    re.IGNORECASE,
+)
+# Broad words ("Automatisierung", "Maschinenbau") turn up in the descriptions of
+# IT and HR jobs too, so a description alone must use one of these narrower ones.
+EU_FIELD_STRONG = re.compile(
+    r"\b(?:mechatroni|mecatr[oó]ni|mécatroni|meccatroni|robot|rob[oó]tic|"
+    r"regelungstechn|steuerungstechn|embedded|kinemat|motion control)"
+    r"|\b(?:sps|plc|ros2?)\b",
+    re.IGNORECASE,
+)
+# Apprenticeships are for school leavers, not university students.
+APPRENTICESHIP = re.compile(
+    r"\b(?:ausbildung|azubi|auszubildende|lehrstelle|lehrling|apprentice|"
+    r"apprenti|leerling|apprendista|aprendiz)", re.IGNORECASE)
+STUDENT_OR_GRAD = re.compile(
+    r"\b(?:werkstudent|praktik|internship|intern\b|thesis|abschlussarbeit|masterarbeit|"
+    r"bachelorarbeit|stagiair|stagiaire|stage\b|afstudeer|tirocin|pr[aá]cticas|becari|"
+    r"sta[żz]|trainee|graduate|junior|absolvent|einsteiger|entry[- ]level)",
+    re.IGNORECASE,
+)
+
+
+def keep_adzuna_europe(job: Job, strict: bool) -> bool:
+    """Robotics/mechatronics roles a student can apply for; with strict, only
+    student, internship, thesis, trainee or graduate titles."""
+    if not (EU_FIELD_MARKERS.search(job.title)
+            or EU_FIELD_STRONG.search(job.description[:800])):
+        return False
+    if APPRENTICESHIP.search(job.title) or not is_student_suitable(job)[0]:
+        return False
+    return not strict or bool(STUDENT_OR_GRAD.search(job.title))
+
 
 # --------------------------------------------------------------------------
 # EURES provider — free, official, no key
@@ -451,7 +523,7 @@ def cmd_sweep(args) -> None:
         raise SystemExit(f"unknown country codes: {', '.join(unknown)}. "
                          f"Available: {', '.join(sorted(MARKETS))}")
 
-    provider = PROVIDERS[args.provider]()
+    provider = EuresProvider()
     store = Store(args.db)
     kinds = [args.kind] if args.kind else list(KINDS)
     total_new = total_seen = skipped = 0
@@ -469,13 +541,11 @@ def cmd_sweep(args) -> None:
 
         for term in terms[: args.max_terms]:
             query = f"{term} {args.field}".strip()
-            locations = market.cities[: args.max_cities] if args.by_city else (market.name,)
+            # EURES filters by country; it ignores a city, so one search per term
+            locations = (market.name,)
             for loc in locations:
                 try:
-                    if isinstance(provider, EuresProvider):
-                        results = provider.search(query, loc, args.pages, False, country=code)
-                    else:
-                        results = provider.search(query, loc, args.pages, args.remote)
+                    results = provider.search(query, loc, args.pages, False, country=code)
                     for job in results:
                         total_seen += 1
                         ok, reason = is_student_suitable(job)
@@ -540,12 +610,8 @@ def main() -> None:
     s.add_argument("--countries", default="DE,NL,FR,SE,PL")
     s.add_argument("--field", default="", help="e.g. 'data science', 'mechanical engineering'")
     s.add_argument("--kind", choices=KINDS, help="restrict to one role type")
-    s.add_argument("--provider", choices=list(PROVIDERS), default="eures")
     s.add_argument("--pages", type=int, default=1)
-    s.add_argument("--by-city", action="store_true", help="search per city instead of country-wide")
-    s.add_argument("--max-cities", type=int, default=3)
     s.add_argument("--max-terms", type=int, default=6)
-    s.add_argument("--remote", action="store_true")
     s.add_argument("--strict", action="store_true", help="drop anything not clearly student-level")
     s.set_defaults(func=cmd_sweep)
 

@@ -6,7 +6,7 @@ REM  Double-click it, or run from a terminal:
 REM      build.bat              normal build (pauses at the end)
 REM      build.bat /nopause     no prompts - for scripts / CI
 REM      build.bat /nojobspy    skip the optional LinkedIn/Indeed engine
-REM                             (smaller .exe, Web search panel disabled)
+REM                             (smaller .exe, LinkedIn / Indeed panel disabled)
 REM      build.bat /fresh       delete and recreate the .venv first
 REM  Flags can be combined. Requires Python 3.10+ on PATH.
 REM
@@ -106,7 +106,7 @@ echo  [5/7] Import check ...
 REM Imports every module the .exe bundles, so a missing dependency or a
 REM broken import fails here in seconds instead of inside the built .exe.
 set "JOBSEARCH_DATA_DIR=%TEMP%\EUJobSearch-buildcheck"
-"%PY%" -c "import job_gui, daily_sweep, fit_score, ba_jobsuche, personio_jobs, workday_jobs, research_jobs, ats_pipeline, ats_checks, ats_plan, ats_embed, company_radar; from fit_score import load_default_scorer; assert load_default_scorer() is not None, 'profile.json missing or invalid'; print('       all modules import, profile.json OK')" || goto :fail
+"%PY%" -c "import job_gui, daily_sweep, fit_score, linkedin_jobs, eu_student_jobs, robotics_track, us_asia_jobs, jobspy_provider, ba_jobsuche, personio_jobs, workday_jobs, research_jobs, company_radar, system_checks, ats_pipeline, ats_checks, ats_plan, ats_embed, ats_latex, ats_prompts, ats_regions; from fit_score import load_default_scorer; assert load_default_scorer() is not None, 'profile.json missing or invalid'; print('       all modules import, profile.json OK')" || goto :fail
 set "JOBSEARCH_DATA_DIR="
 
 REM ---- 6. Build ----------------------------------------------------------

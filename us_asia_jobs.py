@@ -8,7 +8,7 @@ Providers, in order of how much I trust them:
              Documented, keyless, stable. Start here.
   usajobs    US federal jobs. Official OPM API, documented, free key.
              https://developer.usajobs.gov/apirequest
-  adzuna     US + IN + SG + AU + NZ + JP aggregator. Free tier, documented.
+  adzuna     US + IN + SG + AU + NZ aggregator. Free tier, documented.
              https://developer.adzuna.com/
   mcf        Singapore MyCareersFuture. Official public JSON, no key.
              Endpoint is undocumented, so this one probes two known paths.
@@ -34,6 +34,7 @@ from dataclasses import dataclass
 import requests
 
 from linkedin_jobs import Job, RateLimiter, Store, request_with_retry
+from eu_student_jobs import ADZUNA_EUROPE, keep_adzuna_europe
 from robotics_track import (
     ATSBoards,
     Board,
@@ -260,12 +261,17 @@ class USAJobsProvider:
 class AdzunaProvider:
     """Adzuna public API. Free tier at https://developer.adzuna.com/
 
-    Country codes it serves that matter here: us, in, sg, au, nz, jp.
+    US / Asia-Pacific countries here: us, in, sg, au, nz (Adzuna has no Japan
+    service: /jobs/jp/ returns 404, checked 2026-09-30), plus the European
+    countries in eu_student_jobs.ADZUNA_EUROPE, which the app shows under
+    Job boards.
     """
 
     name = "adzuna"
     URL = "https://api.adzuna.com/v1/api/jobs/{country}/search/{page}"
-    COUNTRIES = ("us", "in", "sg", "au", "nz", "jp")
+    US_ASIA = {"us": "United States", "in": "India", "sg": "Singapore",
+               "au": "Australia", "nz": "New Zealand"}
+    COUNTRIES = tuple(US_ASIA) + tuple(ADZUNA_EUROPE)
 
     def __init__(self, app_id: str | None = None, app_key: str | None = None, rpm: int = 25):
         self.app_id = app_id or os.environ.get("ADZUNA_APP_ID")
@@ -280,7 +286,11 @@ class AdzunaProvider:
         self.last_total = 0
 
     def search(self, field: str, country: str = "us", pages: int = 2,
-               max_days_old: int = 30, on_log=None) -> list[Job]:
+               max_days_old: int = 30, on_log=None, where: str = "",
+               distance_km: int = 0, any_of: str = "") -> list[Job]:
+        """`field`: every word must appear. `any_of`: at least one of these
+        words must (Adzuna's what_or), e.g. field "Werkstudent" and any_of
+        "Mechatronik Robotik"."""
         country = country.lower()
         if country not in self.COUNTRIES:
             raise ValueError(f"Adzuna does not serve '{country}'. "
@@ -296,11 +306,20 @@ class AdzunaProvider:
                 "max_days_old": max_days_old,
                 "content-type": "application/json",
             }
+            if any_of:
+                params["what_or"] = any_of
+            if not field:
+                params.pop("what")
+            if where:
+                params["where"] = where
+                if distance_km:
+                    params["distance"] = distance_km
             url = self.URL.format(country=country, page=page)
             payload = request_with_retry(self.session, "GET", url, params=params).json()
             results = payload.get("results") or []
             self.last_total = payload.get("count", 0)
-            msg = f"[adzuna:{country}] {field} page {page}: {len(results)} of {self.last_total}"
+            label = " + any of ".join(x for x in (field, any_of) if x)
+            msg = f"[adzuna:{country}] {label} page {page}: {len(results)} of {self.last_total}"
             print(msg, file=sys.stderr)
             if on_log:
                 on_log(msg)
@@ -549,8 +568,10 @@ def cmd_adzuna(args) -> None:
     store = Store(args.db)
     new = 0
     jobs = provider.search(args.field, args.country, args.pages)
+    europe = args.country in ADZUNA_EUROPE
     for job in jobs:
-        ok, _ = _keep(job, args.strict)
+        # the English-only filter would drop "Werkstudent Mechatronik"
+        ok = keep_adzuna_europe(job, args.strict) if europe else _keep(job, args.strict)[0]
         if not ok:
             continue
         if store.upsert(job):
@@ -625,7 +646,7 @@ def main() -> None:
     u.add_argument("--all-grades", action="store_true", help="don't restrict to GS 05-12")
     u.set_defaults(func=cmd_usajobs)
 
-    d = sub.add_parser("adzuna", help="US/IN/SG/AU/NZ/JP aggregator (needs free key)")
+    d = sub.add_parser("adzuna", help="US/IN/SG/AU/NZ and European aggregator (needs free key)")
     d.add_argument("--field", default="mechatronics engineer")
     d.add_argument("--country", default="us", choices=list(AdzunaProvider.COUNTRIES))
     d.add_argument("--pages", type=int, default=2)

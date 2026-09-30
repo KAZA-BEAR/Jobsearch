@@ -1,7 +1,7 @@
 requests>=2.31.0
 pyinstaller>=6.3.0
-# No anthropic package needed - LM Studio uses the OpenAI-compatible endpoint
-# which is called over plain urllib (zero extra dependencies).
+# No AI SDK needed - LM Studio's local OpenAI-compatible endpoint is called over
+# plain urllib (zero extra dependencies).
 
 # jobspy_provider.py (LinkedIn/Indeed/Glassdoor/ZipRecruiter fallback search)
 # is optional and NOT installed by `pip install -r requirements.txt`, because

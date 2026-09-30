@@ -1,7 +1,7 @@
 # EU Robotics & Mechatronics Job Search
 
 A Windows desktop app for finding robotics, mechatronics and engineering jobs across
-Europe (plus US/Asia from the command line), ranking them against your own profile,
+Europe, the US and Asia-Pacific, ranking them against your own profile,
 tracking applications, and generating a tailored CV and cover letter for a single
 job with a **local** language model.
 
@@ -38,18 +38,19 @@ and by deterministic code checks before it reaches a document.
 | Source | What it covers |
 |---|---|
 | Bundesagentur für Arbeit | Germany's largest job database (public API) |
+| Adzuna Europe | job aggregator for DE, AT, CH, NL, UK, FR, BE, IT, ES, PL (free key) |
 | EURES | EU-wide jobs from the European Commission |
 | EURAXESS | PhD positions across Europe |
 | Employer ATS boards | Greenhouse, Lever, SmartRecruiters, Ashby, Recruitee, Workday, Personio |
 | Research institutes | Fraunhofer, DLR and other institute feeds (HiWi, thesis, PhD) |
 | New companies | Funding signals and new employers per market (`company_radar.py`) |
-| LinkedIn / Indeed (optional) | via `python-jobspy`, or licensed APIs (JSearch / Apify, key needed) |
-| US / Asia (CLI only) | USAJOBS and Adzuna (free keys), employer ATS boards |
+| LinkedIn / Indeed (optional) | via `python-jobspy` (free, no key) |
+| US / Asia | USAJOBS and Adzuna (free keys), MyCareersFuture (Singapore), employer ATS boards |
 
 **Ranking and tracking**
 - **Fit score 0–100** for every job against `profile.json` — instant, no model call.
-- **Daily sweep** of your saved searches, limited to **one run per calendar day**,
-  optionally scheduled as a Windows task.
+- **Daily sweep** of your saved searches (Europe, and optionally the US and Asia-Pacific),
+  limited to **one run per calendar day**, optionally scheduled as a Windows task.
 - **Application tracker** with status, applied date and follow-up reminders.
 
 **CV and cover-letter tailoring**
@@ -191,14 +192,16 @@ one folder above it → the copy bundled into the `.exe` (last resort; the log w
 
 ## Using the app
 
-The window has four tabs:
+The window has six tabs:
 
 | Tab | Purpose |
 |---|---|
 | **Graduate & PhD** | EURAXESS PhD positions, graduate employer boards, research institutes |
-| **Job boards** | Bundesagentur, EURES, Personio, Workday, LinkedIn/Indeed |
+| **Job boards** | Bundesagentur, EURES, Personio, Workday, Adzuna (Europe), LinkedIn/Indeed (JobSpy) |
+| **US & Asia** | USAJOBS, Adzuna, MyCareersFuture, and hiring-calendar notes per market |
 | **New companies** | companies and startups newly hiring |
 | **Applications** | daily sweep, application tracker, and the CV & cover-letter generator |
+| **Unit tests** | checks that the job sources answer, LM Studio has the CV models, and the PC can run them |
 
 **Generating a CV and cover letter**
 1. Open **Applications**. Paste a job ad into *Job description*, or double-click a job
@@ -212,7 +215,37 @@ The window has four tabs:
 5. The status line shows the fit and any warnings; **Outputs folder** opens the files.
    Read `report.md` — it lists every sentence the fact-check removed.
 
-Right-click jobs in the results to track them (saved, applied, interview…).
+Right-click jobs in the results to track them (saved, applied, interview…). **Summary**
+logs counts by source, type, market and company. **Fit score** (next to the job
+description) scores pasted text without adding it to the list.
+
+**API keys** (status bar) stores the free keys for USAJOBS and Adzuna in `settings.json`. A key saved there overrides an environment
+variable of the same name. The US and Asia employer boards are under Graduate & PhD →
+Graduate employer boards → *Region*.
+
+Everything the command-line scripts below can do is also in the app.
+
+**Daily sweep** (Applications → Settings…) can also cover Adzuna Europe and the US and
+Asia-Pacific: US & Asia employer boards, USAJOBS, Adzuna and MyCareersFuture. They are
+off by default. Set their search terms, countries and posting age in the same window.
+Adzuna Europe searches by role (e.g. `Werkstudent`) plus any of a list of field words
+(e.g. `Mechatronik Robotik Automatisierung`), because Adzuna matches whole words and a
+two-word search like `Werkstudent Mechatronik` misses most postings. Leave the roles
+and field words empty to use each country's defaults in its own language. The scheduled
+Windows task reads the keys saved under **API keys** too, and skips a keyed source whose
+key is missing.
+
+**Unit tests** runs health checks. Each one reports pass, warn, fail or skip, and selecting
+a row shows the full reason. **Copy report** puts the results on the clipboard.
+- *APIs*: each job source answers a small real search. Keyed sources are skipped
+  without a key. JobSpy is
+  only checked as installed, because a test scrape of LinkedIn risks a temporary block.
+- *LM Studio*: the app and its `lms` tool are installed, every model the CV generator
+  uses is downloaded, and the local server answers.
+- *Hardware*: 64-bit Python, AVX2, RAM, GPU memory compared with the models' size,
+  free disk space, and `pdflatex` for *Compile PDF*.
+
+The checks change nothing: no jobs are stored and no models are loaded.
 
 ---
 
@@ -237,7 +270,7 @@ python daily_sweep.py --uninstall
 
 python robotics_track.py phd --field robotics --countries DE,NL,SE,CH
 python us_asia_jobs.py --help              # US / Asia-Pacific sources
-python linkedin_jobs.py search "robotics engineer" --location Berlin --pages 2
+python jobspy_provider.py search "robotics engineer" --location Berlin --pages 2
 python linkedin_jobs.py export jobs.csv
 ```
 
@@ -300,22 +333,19 @@ For a signature and photo, put `sig.png` and `profile_pic.png` in
 
 **Data folder:** `%APPDATA%\EUJobSearch` for the `.exe`; the project folder when run from
 source. Contains the job database (`robotics_jobs.db`), `company_radar.db`,
-`sweep_config.json`, `sweep_state.json`, `settings.json` (remembered profile path),
+`sweep_config.json`, `sweep_state.json`, `settings.json` (remembered profile path, API keys, SEC contact email),
 `embed_cache.json` and `ats_outputs\`.
 
-**Environment variables** (all optional):
+**Environment variables** (all optional; the API keys can also be set in the app):
 
 | Variable | Purpose |
 |---|---|
 | `ATS_MODELS` | default model list, e.g. `qwen/qwen3-4b-2507,llama-3.2-3b-instruct` |
-| `ATS_BACKEND` | `lmstudio` (default) or `anthropic` |
 | `ATS_BASE_URL` | OpenAI-compatible server, default `http://localhost:1234/v1` |
-| `ATS_MODEL` | model used when the Model field is empty (Anthropic backend) |
+| `ATS_MODEL` | model used when the Model field is empty (default: the one LM Studio has loaded) |
 | `ATS_EMBED_MODEL` | embedding model, default `text-embedding-nomic-embed-text-v1.5` |
-| `ANTHROPIC_API_KEY` | only for the `anthropic` backend |
 | `JOBSEARCH_DATA_DIR` | override the data folder |
 | `JOBS_DB` | override the job database path |
-| `JSEARCH_API_KEY`, `APIFY_TOKEN` | licensed LinkedIn job APIs |
 | `USAJOBS_API_KEY`, `USAJOBS_EMAIL`, `ADZUNA_APP_ID`, `ADZUNA_APP_KEY` | US / Asia sources |
 
 ---
@@ -334,12 +364,13 @@ source. Contains the job database (`robotics_jobs.db`), `company_radar.db`,
 | `ats_regions.py` | per-market conventions (photo, date of birth, nationality) |
 | `fit_score.py` | 0–100 fit score and profile lookup |
 | `daily_sweep.py` | once-a-day sweep and Windows task |
+| `system_checks.py` | the Unit tests tab's API, LM Studio and hardware checks |
 | `linkedin_jobs.py` | job model, SQLite store, shared HTTP helpers, LinkedIn APIs |
 | `eu_student_jobs.py` | EURES and student-job classification |
 | `robotics_track.py` | EURAXESS PhDs and employer ATS boards |
 | `ba_jobsuche.py`, `personio_jobs.py`, `workday_jobs.py`, `research_jobs.py` | further sources |
 | `company_radar.py` | newly hiring companies |
-| `us_asia_jobs.py` | US / Asia-Pacific sources (CLI) |
+| `us_asia_jobs.py` | US / Asia-Pacific sources |
 | `jobspy_provider.py`, `install_jobspy.py` | optional LinkedIn/Indeed engine |
 | `build.bat`, `jobsearch.spec` | Windows build |
 
@@ -363,8 +394,7 @@ source. Contains the job database (`robotics_jobs.db`), `company_radar.db`,
 ## Privacy
 
 Everything runs locally: job searches call public job APIs, and the CV/letter models run
-in LM Studio on your machine. Nothing from your profile is sent to an online AI service
-unless you switch the backend to `anthropic`.
+in LM Studio on your machine. Nothing from your profile is sent to an online AI service.
 
 **Before pushing this project to GitHub**, keep your personal data out of the repository.
 The included `.gitignore` already excludes `profile.json` and its backups, generated

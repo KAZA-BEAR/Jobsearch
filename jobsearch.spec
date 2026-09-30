@@ -46,6 +46,7 @@ a = Analysis(
         'research_jobs',
         'fit_score',
         'daily_sweep',
+        'system_checks',
         'xml.etree.ElementTree',
         'email.utils',
         # requests pulls these in dynamically
