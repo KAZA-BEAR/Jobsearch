@@ -27,6 +27,7 @@ and by deterministic code checks before it reaches a document.
 - [Project structure](#project-structure)
 - [Troubleshooting](#troubleshooting)
 - [Privacy](#privacy)
+- [License](#license)
 
 ---
 
@@ -369,3 +370,15 @@ unless you switch the backend to `anthropic`.
 The included `.gitignore` already excludes `profile.json` and its backups, generated
 PDFs and outputs, the local databases and caches, and the build folders. Share a
 placeholder profile such as the example above instead of your real one.
+
+---
+
+## License
+
+This project is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE).
+You may use, modify and share it for personal, research, educational and other
+**noncommercial** purposes. **Commercial use is not permitted.** For a commercial
+license, contact the author.
+
+The third-party libraries it uses keep their own licenses (Apache-2.0, MIT, BSD,
+MPL-2.0 and others). They are listed in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
