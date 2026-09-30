@@ -1,0 +1,25 @@
+# Personal data - never commit
+profile.json
+profile.backup-*.json
+*.pdf
+photo.*
+
+# Local databases and caches
+*.db
+*.db-shm
+*.db-wal
+embed_cache.json
+settings.json
+sweep_state.json
+
+# Generated documents
+ats_outputs/
+outputs/
+
+# Build and environment
+.venv/
+venv/
+build/
+dist/
+__pycache__/
+*.pyc
