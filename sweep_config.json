@@ -1,0 +1,102 @@
+{
+  "min_fit": 50,
+  "notify": true,
+  "run_on_app_start": true,
+  "sources": {
+    "ba": true,
+    "personio": true,
+    "workday": true,
+    "research": true,
+    "boards": true,
+    "eures": false,
+    "adzuna_eu": false,
+    "us_asia_boards": false,
+    "usajobs": false,
+    "adzuna": false,
+    "mcf": false
+  },
+  "ba": {
+    "searches": [
+      {
+        "query": "Werkstudent Robotik",
+        "where": "Straubing",
+        "radius": 150
+      },
+      {
+        "query": "Werkstudent Mechatronik",
+        "where": "Straubing",
+        "radius": 150
+      },
+      {
+        "query": "Praktikum Robotik",
+        "where": "Straubing",
+        "radius": 150
+      },
+      {
+        "query": "Masterarbeit Robotik",
+        "where": "",
+        "radius": 0
+      },
+      {
+        "query": "Werkstudent ROS",
+        "where": "",
+        "radius": 0
+      },
+      {
+        "query": "Junior Robotik Ingenieur",
+        "where": "München",
+        "radius": 50
+      }
+    ],
+    "days": 2
+  },
+  "workday": {
+    "queries": [
+      "Werkstudent",
+      "working student robotics",
+      "Praktikum"
+    ],
+    "country": "Germany"
+  },
+  "research": {
+    "sources": [
+      "fraunhofer",
+      "dlr",
+      "mpg",
+      "thd"
+    ],
+    "keywords": [
+      "robotik",
+      "mechatronik",
+      "autonom"
+    ]
+  },
+  "eures": {
+    "countries": [
+      "DE"
+    ],
+    "field": "robotics"
+  },
+  "adzuna_eu": {
+    "countries": [
+      "de"
+    ],
+    "roles": [],
+    "fields": "",
+    "where": "",
+    "radius": 100,
+    "days": 3
+  },
+  "us_asia": {
+    "fields": [
+      "robotics",
+      "mechatronics"
+    ],
+    "adzuna_countries": [
+      "us",
+      "sg"
+    ],
+    "usajobs_location": "",
+    "days": 3
+  }
+}

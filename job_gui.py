@@ -25,14 +25,15 @@ from pathlib import Path
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+from tkinter import font as tkfont
 
 from linkedin_jobs import (Store, Job, STATUSES, age_hours, data_dir, parse_posted,
-                           apply_saved_api_keys,
+                           apply_saved_api_keys, outputs_dir,
                            load_settings, settings_path)
 from eu_student_jobs import (MARKETS, KINDS, EuresProvider, classify, is_student_suitable,
                              ADZUNA_EUROPE, ADZUNA_EU_DEFAULTS, keep_adzuna_europe)
 from ats_pipeline import (
-    DEFAULT_BACKEND, DEFAULT_BASE_URL, DEFAULT_LOCAL_MODELS,
+    DEFAULT_BACKEND, DEFAULT_BASE_URL, DEFAULT_LOCAL_MODELS, DEFAULT_WRITER,
     PipelineError, list_local_models, run as ats_run,
 )
 from ats_regions import DEFAULT_REGION, REGIONS as ATS_REGIONS
@@ -71,6 +72,7 @@ from personio_jobs import (COMPANIES as PERSONIO_COMPANIES, PersonioCompany, Per
                            slug_candidates as personio_slug_candidates)
 from workday_jobs import SITES as WORKDAY_SITES, WorkdayBoards, parse_url as parse_workday_url
 from research_jobs import SOURCES as RESEARCH_SOURCES, ResearchFeeds
+from discover_jobs import REGIONS as DISCOVERY_REGIONS, SOURCES as DISCOVERY_SOURCES, Discovery
 from fit_score import (FitScorer, default_profile_path, is_bundled_copy, load_default_scorer,
                        remember_profile_path, rescore)
 import daily_sweep
@@ -196,8 +198,8 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("EU Robotics & Mechatronics Job Search")
-        self.geometry("1100x720")
-        self.minsize(900, 600)
+        self.geometry("1320x800")
+        self.minsize(1000, 640)
 
         apply_saved_api_keys()
         self.scorer: FitScorer | None = load_default_scorer()
@@ -216,113 +218,308 @@ class App(tk.Tk):
 
     # ---------------- styling ----------------
 
+    # One light palette for the whole window; the sidebar is the only dark area.
+    BG, CARD, LINE = "#f4f5f7", "#ffffff", "#dde1e7"
+    TEXT, MUTED, ACCENT = "#1f2937", "#6b7280", "#2563eb"
+    SIDE, SIDE_FG, SIDE_DIM, SIDE_ON = "#1e293b", "#cbd5e1", "#8391a7", "#334155"
+
     def _build_style(self) -> None:
         s = ttk.Style(self)
         try:
             s.theme_use("clam")
         except tk.TclError:
             pass
-        s.configure("Treeview", rowheight=26, font=("TkDefaultFont", 10))
-        s.configure("Treeview.Heading", font=("TkDefaultFont", 10, "bold"))
-        s.configure("Run.TButton", font=("TkDefaultFont", 10, "bold"), padding=6)
-        s.configure("Seg.Toolbutton", padding=(12, 5), relief="flat", background="#e4e4e4")
+        self.configure(bg=self.BG)
+        base = ("Segoe UI", 10)
+        # The named default fonts, not option_add("*Font"): that sets every ttk widget's
+        # own -font, which overrides the heading styles below.
+        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
+            tkfont.nametofont(name).configure(family="Segoe UI", size=10)
+        s.configure(".", background=self.BG, foreground=self.TEXT, font=base)
+        s.configure("TFrame", background=self.BG)
+        s.configure("TLabel", background=self.BG, foreground=self.TEXT)
+        s.configure("TCheckbutton", background=self.BG)
+        s.configure("TRadiobutton", background=self.BG)
+        s.configure("TLabelframe", background=self.BG, bordercolor=self.LINE)
+        s.configure("TLabelframe.Label", background=self.BG, foreground=self.MUTED)
+        s.configure("Card.TFrame", background=self.CARD, relief="solid", borderwidth=1)
+        s.configure("Card.TLabel", background=self.CARD)
+        s.configure("Card.TCheckbutton", background=self.CARD)
+        s.configure("Muted.TLabel", foreground=self.MUTED)
+        s.configure("H1.TLabel", font=("Segoe UI Semibold", 16))
+        s.configure("H2.TLabel", font=("Segoe UI Semibold", 11))
+        s.configure("Treeview", rowheight=28, background=self.CARD, fieldbackground=self.CARD,
+                    bordercolor=self.LINE)
+        s.configure("Treeview.Heading", font=("Segoe UI Semibold", 10), background="#eef0f3",
+                    relief="flat")
+        s.map("Treeview", background=[("selected", "#dbe7ff")], foreground=[("selected", self.TEXT)])
+        # clam gives every button an 11-character minimum width; size to the label instead.
+        s.configure("TButton", padding=(10, 4), width=-4)
+        s.configure("Run.TButton", font=("Segoe UI Semibold", 10), padding=(14, 6),
+                    background=self.ACCENT, foreground="white", bordercolor=self.ACCENT)
+        s.map("Run.TButton", background=[("active", "#1d4ed8"), ("disabled", "#9db7f0")])
+        s.configure("Link.TButton", relief="flat", background=self.BG, foreground=self.ACCENT,
+                    padding=(4, 2), borderwidth=0)
+        s.map("Link.TButton", background=[("active", self.BG)])
+        s.configure("Seg.Toolbutton", padding=(10, 4), relief="flat", background="#e6e9ee")
         s.map("Seg.Toolbutton",
-              background=[("selected", "#3b6ea5"), ("active", "#d0d8e4")],
+              background=[("selected", self.ACCENT), ("active", "#d5dceb")],
               foreground=[("selected", "white")])
 
     # ---------------- layout ----------------
 
+    NAV = (("jobs", "Jobs"), ("find", "Find jobs"), ("apps", "Applications"),
+           ("companies", "New companies"), ("settings", "Settings"))
+
     def _build_layout(self) -> None:
-        outer = ttk.Frame(self, padding=8)
-        outer.pack(fill="both", expand=True)
-        # Packed first, at the bottom: packed last, a short window pushed it out
-        # of view, taking the Stop and API keys buttons with it.
-        self._statusbar(outer)
+        self._page = ""
+        root = tk.Frame(self, bg=self.BG)
+        root.pack(fill="both", expand=True)
+        self._sidebar(root)
 
-        panes = ttk.PanedWindow(outer, orient="vertical")
-        panes.pack(fill="both", expand=True)
-        self.panes = panes
+        main = ttk.Frame(root)
+        main.pack(side="left", fill="both", expand=True)
+        # Status bar and the (hidden) activity log are packed first, at the bottom:
+        # packed last, a short window pushed them out of view.
+        self._statusbar(main)
+        self._console(main)
 
-        top = ttk.Frame(panes)
-        panes.add(top, weight=0)
-        self.tabs = ttk.Notebook(top)
-        self.tabs.pack(fill="x")
-        self._tab_switcher("  Graduate & PhD  ", [
-            ("PhD positions", self._panel_phd),
-            ("Graduate employer boards", self._panel_grad),
-            ("Research institutes", self._panel_research),
-        ])
-        self._tab_switcher("  Job boards  ", [
-            ("Arbeitsagentur (DE)", self._panel_ba),
-            ("EURES internships / Werkstudent", self._panel_student),
-            ("Personio", self._panel_personio),
-            ("Workday", self._panel_workday),
-            ("Adzuna (Europe)", self._panel_adzuna_eu),
-            ("LinkedIn / Indeed", self._panel_jobspy),
-        ])
-        self._tab_switcher("  US & Asia  ", [
-            ("USAJOBS (US federal)", self._panel_usajobs),
-            ("Adzuna (US / Asia-Pacific)", self._panel_adzuna),
-            ("MyCareersFuture (SG)", self._panel_mcf),
-            ("Market notes", self._panel_markets),
-        ])
-        self._tab_radar()
-        self._tab_apps()
-        self._tab_tests()
-        self.tabs.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+        self.content = ttk.Frame(main, padding=(18, 14, 18, 6))
+        self.content.pack(fill="both", expand=True)
+        self.pages: dict[str, ttk.Frame] = {k: ttk.Frame(self.content) for k, _ in self.NAV}
+        self._page_jobs(self.pages["jobs"])
+        self._page_find(self.pages["find"])
+        # Settings before the pages that read its fields (models, server, SEC email).
+        self._page_settings(self.pages["settings"])
+        self._tab_apps(self.pages["apps"])
+        self._tab_radar(self.pages["companies"])
+        self.show_page("jobs")
+        self._sweep_refresh_status()
 
-        mid = ttk.Frame(panes)
-        panes.add(mid, weight=3)
-        self._results(mid)
+    def _sidebar(self, root) -> None:
+        side = tk.Frame(root, bg=self.SIDE, width=200)
+        side.pack(side="left", fill="y")
+        side.pack_propagate(False)
+        tk.Label(side, text="EU Job Search", bg=self.SIDE, fg="white", anchor="w",
+                 font=("Segoe UI Semibold", 14)).pack(fill="x", padx=18, pady=(20, 0))
+        tk.Label(side, text="Robotics · Mechatronics", bg=self.SIDE, fg=self.SIDE_DIM,
+                 anchor="w").pack(fill="x", padx=18, pady=(0, 22))
+        self._nav: dict[str, tk.Label] = {}
+        for key, label in self.NAV:
+            b = tk.Label(side, text=label, bg=self.SIDE, fg=self.SIDE_FG, anchor="w",
+                         padx=18, pady=9, cursor="hand2", font=("Segoe UI", 11))
+            b.pack(fill="x")
+            b.bind("<Button-1>", lambda _e, k=key: self.show_page(k))
+            b.bind("<Enter>", lambda _e, k=key: self._nav_paint(k, hover=True))
+            b.bind("<Leave>", lambda _e, k=key: self._nav_paint(k))
+            self._nav[key] = b
+        self._nav_badge: dict[str, str] = {}
 
-        bot = ttk.Frame(panes)
-        panes.add(bot, weight=1)
-        self._console(bot)
+        sweep = tk.Frame(side, bg=self.SIDE)
+        sweep.pack(side="bottom", fill="x", padx=16, pady=16)
+        tk.Label(sweep, text="Daily sweep", bg=self.SIDE, fg="white", anchor="w",
+                 font=("Segoe UI Semibold", 10)).pack(fill="x")
+        self.sw_status = tk.StringVar(value="")
+        tk.Label(sweep, textvariable=self.sw_status, bg=self.SIDE, fg=self.SIDE_DIM, anchor="w",
+                 justify="left", wraplength=165).pack(fill="x", pady=(2, 8))
+        ttk.Button(sweep, text="Run sweep now", style="Run.TButton",
+                   command=self.run_sweep_now).pack(fill="x")
 
-        self.after(50, self._fit_tabs)
+    def _nav_paint(self, key: str, hover: bool = False) -> None:
+        b = self._nav[key]
+        on = key == self._page
+        b.configure(bg=self.SIDE_ON if on or hover else self.SIDE,
+                    fg="white" if on else self.SIDE_FG,
+                    font=("Segoe UI Semibold" if on else "Segoe UI", 11))
+        label = dict(self.NAV)[key]
+        badge = self._nav_badge.get(key, "")
+        b.configure(text=f"{label}   {badge}" if badge else label)
 
-    def _fit_tabs(self) -> None:
-        """Size the tab area to the tab being shown.
+    def set_badge(self, key: str, text: str) -> None:
+        self._nav_badge[key] = text
+        if hasattr(self, "_nav"):
+            self._nav_paint(key)
 
-        ttk.Notebook otherwise reserves the height of its tallest tab, which
-        left short tabs with a large empty gap and squeezed the results table.
-        """
-        self.update_idletasks()
-        current = self.nametowidget(self.tabs.select())
-        self.tabs.configure(height=current.winfo_reqheight())
-        self.update_idletasks()
-        top = self.tabs.winfo_reqheight()
-        self.panes.sashpos(0, top)
-        # Keep the activity log compact so the results table gets the room.
-        total = self.panes.winfo_height()
-        if total > 1:
-            self.panes.sashpos(1, max(top + 160, total - 110))
+    def show_page(self, key: str) -> None:
+        if key == self._page:
+            return
+        if self._page:
+            self.pages[self._page].pack_forget()
+        self._page = key
+        self.pages[key].pack(fill="both", expand=True)
+        for k in self._nav:
+            self._nav_paint(k)
+        if key == "apps":
+            self.refresh_tracker()
 
-    def _tab_switcher(self, title: str, panels) -> None:
-        """One notebook tab holding several search panels, picked with a
-        segmented button row instead of a tab each."""
-        tab = ttk.Frame(self.tabs, padding=(10, 8))
-        self.tabs.add(tab, text=title)
-        bar = ttk.Frame(tab)
-        bar.pack(fill="x")
-        body = ttk.Frame(tab)
+    def _header(self, parent, title: str, subtitle: str = "") -> ttk.Frame:
+        """Page title on the left; returns the right-hand slot for page actions."""
+        head = ttk.Frame(parent)
+        head.pack(fill="x", pady=(0, 10))
+        ttk.Label(head, text=title, style="H1.TLabel").pack(side="left")
+        if subtitle:
+            ttk.Label(head, text=subtitle, style="Muted.TLabel").pack(side="left", padx=(12, 0),
+                                                                      pady=(6, 0))
+        slot = ttk.Frame(head)
+        slot.pack(side="right")
+        return slot
+
+    # ---------------- page: jobs ----------------
+
+    def _page_jobs(self, page) -> None:
+        self._header(page, "Jobs", "everything found so far, best fit first")
+        self._results(page)
+
+    # ---------------- page: find jobs ----------------
+
+    # Where each search lives. One source is shown at a time, picked from this list.
+    SOURCE_GROUPS = (
+        ("Germany", (("Arbeitsagentur", "_panel_ba"), ("Personio companies", "_panel_personio"),
+                     ("Workday companies", "_panel_workday"))),
+        ("Europe", (("Internships & Werkstudent (EURES)", "_panel_student"),
+                    ("Adzuna Europe", "_panel_adzuna_eu"), ("LinkedIn / Indeed", "_panel_jobspy"))),
+        ("PhD & research", (("PhD positions (EURAXESS)", "_panel_phd"),
+                            ("Research & new employers", "_panel_research"),
+                            ("Graduate employer boards", "_panel_grad"))),
+        ("US & Asia", (("USAJOBS", "_panel_usajobs"), ("Adzuna US / Asia", "_panel_adzuna"),
+                       ("MyCareersFuture (SG)", "_panel_mcf"), ("Market notes", "_panel_markets"))),
+    )
+
+    def _page_find(self, page) -> None:
+        self._header(page, "Find jobs", "pick a source; results appear under Jobs")
+        body = ttk.Frame(page)
         body.pack(fill="both", expand=True)
-        var = tk.StringVar(value=panels[0][0])
-        frames: dict[str, ttk.Frame] = {}
 
-        def show() -> None:
-            for fr in frames.values():
-                fr.pack_forget()
-            frames[var.get()].pack(fill="both", expand=True)
-            self._fit_tabs()
+        menu = tk.Frame(body, bg=self.CARD, highlightthickness=1, highlightbackground=self.LINE)
+        menu.pack(side="left", fill="y")
+        card = tk.Frame(body, bg=self.BG)
+        card.pack(side="left", fill="both", expand=True, padx=(14, 0))
+        self._source_title = tk.StringVar()
+        ttk.Label(card, textvariable=self._source_title, style="H2.TLabel").pack(anchor="w")
+        holder = ttk.Frame(card, padding=(0, 8, 0, 0))
+        holder.pack(fill="both", expand=True)
 
-        for label, build in panels:
-            fr = ttk.Frame(body, padding=(0, 10, 0, 0))
-            build(fr)
-            frames[label] = fr
-            ttk.Radiobutton(bar, text=label, value=label, variable=var, style="Seg.Toolbutton",
-                            command=show).pack(side="left", padx=(0, 4))
-        frames[panels[0][0]].pack(fill="both", expand=True)
+        self._sources: dict[str, tuple[tk.Label, ttk.Frame]] = {}
+        for group, items in self.SOURCE_GROUPS:
+            tk.Label(menu, text=group.upper(), bg=self.CARD, fg=self.MUTED, anchor="w",
+                     font=("Segoe UI Semibold", 8)).pack(fill="x", padx=14, pady=(12, 2))
+            for label, builder in items:
+                item = tk.Label(menu, text=label, bg=self.CARD, fg=self.TEXT, anchor="w",
+                                padx=14, pady=4, cursor="hand2")
+                item.pack(fill="x")
+                frame = ttk.Frame(holder)
+                getattr(self, builder)(frame)
+                self._fold_checkboxes(frame)
+                item.bind("<Button-1>", lambda _e, l=label: self.show_source(l))
+                self._sources[label] = (item, frame)
+        tk.Frame(menu, bg=self.CARD, height=10).pack()
+        # Help text was wrapped for the old full-width tabs; wrap it to the space there is.
+        holder.bind("<Configure>", lambda e: self._rewrap(holder, e.width - 24))
+        self._source = ""
+        self.show_source(self.SOURCE_GROUPS[0][1][0][0])
+
+    @staticmethod
+    def _checkbuttons(widget) -> list:
+        found = [widget] if isinstance(widget, ttk.Checkbutton) else []
+        for child in widget.winfo_children():
+            found += App._checkbuttons(child)
+        return found
+
+    def _fold_checkboxes(self, f) -> None:
+        """Move a source panel's checkboxes (and their row labels) into a collapsed
+        'Advanced filters' section, so a panel shows only what you type in.
+
+        The widgets keep their parent and variables; they are only re-gridded inside
+        a frame that is itself a child of the panel (Tk allows grid in_= a sibling)."""
+        kids = [c for c in f.winfo_children() if c.winfo_manager() == "grid"]
+        movers = [c for c in kids if self._checkbuttons(c)]
+        if not movers:
+            return
+        run = [c for c in kids if isinstance(c, ttk.Button)
+               and str(c.cget("style")) == "Run.TButton"]
+        adv = ttk.Frame(f, padding=(14, 4, 0, 6))
+        for r, widget in enumerate(sorted(movers, key=lambda c: int(c.grid_info()["row"]))):
+            row = int(widget.grid_info()["row"])
+            same_row = [c for c in kids if int(c.grid_info()["row"]) == row and c is not widget]
+            label = next((c for c in same_row if isinstance(c, ttk.Label)
+                          and int(c.grid_info()["column"]) == 0), None)
+            # The row label goes along only when the checkboxes are all the row holds:
+            # "Keywords" labels the box beside it, not "Skip senior roles" further right.
+            if label is not None and all(c is label or c in movers for c in same_row):
+                label.grid(in_=adv, row=r, column=0, sticky="nw", padx=(0, 12), pady=3)
+                label.lift(adv)
+            widget.grid(in_=adv, row=r, column=1, columnspan=1, sticky="w", padx=0, pady=3)
+            # adv was made after these widgets, so it would be drawn over them.
+            widget.lift(adv)
+        boxes = self._checkbuttons(adv.master)
+
+        def summary() -> str:
+            """What is ticked, by name when it is short ('DE, NL, SE · Funded positions
+            only'), else a count."""
+            on = []
+            for cb in boxes:
+                try:
+                    if self.getboolean(self.getvar(str(cb.cget("variable")))):
+                        text = str(cb.cget("text")).split(" (")[0].rstrip(":")
+                        code = text.split()[0] if text else ""
+                        on.append(code if re.fullmatch(r"[A-Z]{2}", code) else text)
+                except (tk.TclError, ValueError):
+                    pass
+            codes = [t for t in on if re.fullmatch(r"[A-Z]{2}", t)]
+            names = [t for t in on if t not in codes] + ([", ".join(codes)] if codes else [])
+            text = " · ".join(names)
+            if not on:
+                return "none ticked"
+            return text if len(text) <= 70 else f"{len(on)} of {len(boxes)} ticked"
+
+        btn = ttk.Button(f, style="Link.TButton")
+        state = {"open": False}
+
+        def paint() -> None:
+            arrow = "▾" if state["open"] else "▸"
+            btn.configure(text=f"Advanced filters {arrow}   ({summary()})")
+
+        def toggle() -> None:
+            state["open"] = not state["open"]
+            if state["open"]:
+                adv.grid()
+            else:
+                adv.grid_remove()
+            paint()
+
+        last = max(int(c.grid_info()["row"]) for c in kids)
+        btn.configure(command=toggle)
+        btn.grid(row=last + 1, column=0, columnspan=6, sticky="w", pady=(10, 0))
+        adv.grid(row=last + 2, column=0, columnspan=6, sticky="w")
+        adv.grid_remove()           # remembers its place for toggle()
+        for b in run:
+            b.grid(row=last + 3)
+        for cb in boxes:
+            cb.bind("<ButtonRelease-1>", lambda _e: self.after(10, paint), add="+")
+        paint()
+
+    def _rewrap(self, widget, width: int) -> None:
+        if width < 200:
+            return
+        for child in widget.winfo_children():
+            if isinstance(child, (ttk.Label, tk.Label)):
+                try:
+                    if int(str(child.cget("wraplength")) or 0) > 0:
+                        child.configure(wraplength=width)
+                except (tk.TclError, ValueError):
+                    pass
+            self._rewrap(child, width)
+
+    def show_source(self, label: str) -> None:
+        if self._source:
+            item, frame = self._sources[self._source]
+            frame.pack_forget()
+            item.configure(bg=self.CARD, fg=self.TEXT, font=("Segoe UI", 10))
+        self._source = label
+        item, frame = self._sources[label]
+        frame.pack(fill="both", expand=True, anchor="nw")
+        item.configure(bg="#e8efff", fg=self.ACCENT, font=("Segoe UI Semibold", 10))
+        self._source_title.set(label)
 
     # ---------------- panel: PhD ----------------
 
@@ -678,7 +875,7 @@ class App(tk.Tk):
                        "words: a job must contain the role word and at least one field word. "
                        "Picking a country fills both in that country's language. Leave 'Near' "
                        "empty for the whole country. Needs the free Adzuna app ID and key "
-                       "(API keys… in the status bar), the same ones as the US & Asia tab.").grid(
+                       "(Settings → API keys), the same ones as Adzuna US / Asia.").grid(
             row=5, column=0, columnspan=4, sticky="w", pady=(6, 0))
         ttk.Button(f, text="Search Adzuna", style="Run.TButton",
                    command=self.run_adzuna_eu).grid(row=6, column=1, sticky="w", pady=(12, 0))
@@ -739,10 +936,13 @@ class App(tk.Tk):
         self.wd_country = ttk.Entry(f, width=16)
         self.wd_country.insert(0, "Germany")
         self.wd_country.grid(row=0, column=3, sticky="w", padx=6)
-        ttk.Label(f, text="Max per employer").grid(row=0, column=4, sticky="w", padx=(18, 0))
+        # Beside the employer list, not a fifth column: that ran off the narrower panel.
+        cap = ttk.Frame(f)
+        cap.grid(row=1, column=4, sticky="nw", padx=(18, 0), pady=(8, 0))
+        ttk.Label(cap, text="Max per employer").pack(anchor="w")
         self.wd_max = tk.IntVar(value=100)
-        ttk.Spinbox(f, from_=10, to=500, increment=10, textvariable=self.wd_max, width=5).grid(
-            row=0, column=5, sticky="w", padx=6)
+        ttk.Spinbox(cap, from_=10, to=500, increment=10, textvariable=self.wd_max,
+                    width=5).pack(anchor="w", pady=(2, 0))
 
         ttk.Label(f, text="Employers").grid(row=1, column=0, sticky="nw", pady=(8, 0))
         box = ttk.Frame(f)
@@ -802,40 +1002,107 @@ class App(tk.Tk):
 
         self.start(f"Workday · {text or 'all'} · {len(sites)} employers", task)
 
-    # ---------------- tab: research institutes ----------------
+    # ---------------- tab: research & discovery ----------------
 
     def _panel_research(self, f) -> None:
+        saved = _load_settings().get("discovery", {})
 
         ttk.Label(f, text="Keywords").grid(row=0, column=0, sticky="w", pady=3)
         self.res_query = ttk.Combobox(f, width=28, values=[
             "robotik", "mechatronik", "autonom", "robotics", "Hilfskraft", "Masterarbeit",
             "Doktorand", ""])
-        self.res_query.set("robotik")
+        self.res_query.set(saved.get("keywords", ""))
         self.res_query.grid(row=0, column=1, sticky="w", padx=6)
+        ttk.Label(f, text="Region").grid(row=0, column=2, sticky="w", padx=(18, 0))
+        self.disc_region = ttk.Combobox(f, width=10, state="readonly", values=list(DISCOVERY_REGIONS))
+        self.disc_region.set(saved.get("region", "germany"))
+        self.disc_region.grid(row=0, column=3, sticky="w", padx=6)
+        self.disc_entry = tk.BooleanVar(value=saved.get("entry_only", True))
+        ttk.Checkbutton(f, text="Skip senior / lead roles", variable=self.disc_entry).grid(
+            row=0, column=4, sticky="w", padx=(12, 0))
+        f.columnconfigure(5, weight=1)
 
-        ttk.Label(f, text="Sources").grid(row=1, column=0, sticky="nw", pady=(8, 0))
+        ttk.Label(f, text="Known institutes").grid(row=1, column=0, sticky="nw", pady=(8, 0))
         box = ttk.Frame(f)
-        box.grid(row=1, column=1, columnspan=3, sticky="w", pady=(8, 0))
+        box.grid(row=1, column=1, columnspan=4, sticky="w", pady=(8, 0))
         self.res_sources: dict[str, tk.BooleanVar] = {}
+        on = saved.get("institutes", list(RESEARCH_SOURCES))
         for i, (code, label) in enumerate(RESEARCH_SOURCES.items()):
-            v = tk.BooleanVar(value=True)
-            ttk.Checkbutton(box, text=label, variable=v).grid(row=i // 2, column=i % 2,
-                                                              sticky="w", padx=(0, 18))
+            v = tk.BooleanVar(value=code in on)
+            ttk.Checkbutton(box, text=label.replace(" (German Aerospace Center)", ""),
+                            variable=v).grid(row=0, column=i, sticky="w", padx=(0, 14))
             self.res_sources[code] = v
-        ttk.Label(f, foreground="#555", wraplength=720, justify="left",
-                  text="HiWi (studentische Hilfskraft), thesis, internship and PhD roles straight "
-                       "from Fraunhofer, DLR (incl. the Institute of Robotics and Mechatronics), "
-                       "Max Planck and TH Deggendorf. Empty keywords = everything.").grid(
-            row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
-        ttk.Button(f, text="Search institutes", style="Run.TButton",
-                   command=self.run_research).grid(row=3, column=1, sticky="w", pady=(12, 0))
+
+        ttk.Label(f, text="Find new employers").grid(row=2, column=0, sticky="nw", pady=(8, 0))
+        disc = ttk.Frame(f)
+        disc.grid(row=2, column=1, columnspan=4, sticky="w", pady=(8, 0))
+        on = saved.get("sources", ["crawl", "wikidata", "yc", "hn"])
+        labels = {
+            "crawl": "Company & startup job boards (Common Crawl)",
+            "wikidata": "Institutes & engineering firms (Wikidata)",
+            "yc": "Y Combinator startups",
+            "hn": "Hacker News 'Who is hiring?'",
+            "sites": "My own websites:",
+        }
+        self.disc_sources: dict[str, tk.BooleanVar] = {}
+        for i, (code, label) in enumerate(labels.items()):
+            v = tk.BooleanVar(value=code in on)
+            ttk.Checkbutton(disc, text=label, variable=v).grid(row=i, column=0, sticky="w")
+            self.disc_sources[code] = v
+        self.disc_budget = tk.IntVar(value=saved.get("budget", 300))
+        self.disc_site_budget = tk.IntVar(value=saved.get("site_budget", 80))
+        for row, var, unit in ((0, self.disc_budget, "boards per run"),
+                               (1, self.disc_site_budget, "sites per run")):
+            cell = ttk.Frame(disc)
+            cell.grid(row=row, column=1, sticky="w", padx=(10, 0))
+            ttk.Spinbox(cell, from_=0, to=5000, increment=50, textvariable=var, width=6).pack(side="left")
+            ttk.Label(cell, text=unit).pack(side="left", padx=4)
+        self.disc_urls = ttk.Entry(disc, width=34)
+        self.disc_urls.insert(0, saved.get("urls", ""))
+        self.disc_urls.grid(row=4, column=1, sticky="w", padx=(10, 0))
+
+        ttk.Label(f, style="Muted.TLabel", wraplength=600, justify="left",
+                  text="Known institutes: HiWi, thesis, internship and PhD roles (empty keywords = "
+                       "everything). New employers: Personio, Greenhouse, Ashby, Recruitee and "
+                       "Workable boards from Common Crawl's index, plus career pages of institutes, "
+                       "firms and startups — a batch per run, remembered between runs (the first "
+                       "run downloads the index, a few minutes). Finds also appear under New "
+                       "companies. Separate several websites with spaces.").grid(
+            row=3, column=0, columnspan=5, sticky="w", pady=(6, 0))
+        ttk.Button(f, text="Search", style="Run.TButton",
+                   command=self.run_research).grid(row=4, column=1, sticky="w", pady=(10, 0))
 
     def run_research(self) -> None:
         sources = [c for c, v in self.res_sources.items() if v.get()]
-        if not sources:
-            messagebox.showwarning("No sources", "Pick at least one institute.")
+        discover = [c for c, v in self.disc_sources.items() if v.get()]
+        urls = self.disc_urls.get().split()
+        if "sites" in discover and not urls:
+            messagebox.showwarning("No websites", "Type at least one website, or untick "
+                                                  "'My own websites'.")
+            return
+        if not sources and not discover:
+            messagebox.showwarning("No sources", "Pick at least one institute or discovery source.")
             return
         kw = self.res_query.get().strip()
+        region = self.disc_region.get()
+        entry_only = self.disc_entry.get()
+        budget, site_budget = self.disc_budget.get(), self.disc_site_budget.get()
+        settings = _load_settings()
+        settings["discovery"] = {"keywords": kw, "region": region, "entry_only": entry_only,
+                                 "institutes": sources, "sources": discover, "budget": budget,
+                                 "site_budget": site_budget, "urls": " ".join(urls)}
+        try:
+            _settings_path().write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+
+        def keep(w: Worker, label: str, jobs: list[Job]) -> None:
+            new = 0
+            for job in jobs:
+                if self.store.upsert(job):
+                    new += 1
+                    w.found(job)
+            w.log(f"{label}: {len(jobs)} roles, {new} new")
 
         def task(w: Worker) -> None:
             feeds = ResearchFeeds()
@@ -843,65 +1110,62 @@ class App(tk.Tk):
                 if w.cancelled.is_set():
                     return
                 try:
-                    jobs = feeds.search(src, kw, on_log=w.log)
+                    keep(w, RESEARCH_SOURCES[src], feeds.search(src, kw, on_log=w.log))
                 except Exception as exc:
                     w.log(f"{RESEARCH_SOURCES[src]}: FAILED — {exc}")
-                    continue
-                new = 0
-                for job in jobs:
-                    if self.store.upsert(job):
-                        new += 1
-                        w.found(job)
-                w.log(f"{RESEARCH_SOURCES[src]}: {len(jobs)} roles, {new} new")
+            if not discover or w.cancelled.is_set():
+                return
+            d = Discovery(region=region, keywords=kw, entry_only=entry_only,
+                          on_log=w.log, cancelled=w.cancelled)
+            for src in discover:
+                if w.cancelled.is_set():
+                    break
+                keep(w, DISCOVERY_SOURCES[src], d.run([src], budget=budget,
+                                                      site_budget=site_budget, urls=urls))
+            for company in d.companies.values():
+                self.radar.upsert(company)
+            if d.companies:
+                w.log(f"{len(d.companies)} employers added to New companies (signal: discovered)")
+                self._ui(self.load_radar)
 
-        self.start(f"Research · {kw or 'all'}", task)
+        self.start(f"Research & discovery · {kw or 'all'} · {region}", task)
 
     # ---------------- tab: application tracker ----------------
 
     TRACK_COLS = ("status", "fit", "title", "company", "applied", "follow_up", "notes")
 
-    def _tab_apps(self) -> None:
-        """Daily sweep bar on top; tracker and CV tailor side by side below."""
-        tab = ttk.Frame(self.tabs, padding=(10, 8))
-        self.tabs.add(tab, text="  Applications  ")
-        self._apps_tab = tab
-
-        sweep = ttk.Frame(tab)
-        sweep.pack(fill="x", pady=(0, 8))
-        ttk.Label(sweep, text="Daily sweep", font=("TkDefaultFont", 10, "bold")).pack(side="left")
-        self.sw_status = tk.StringVar(value="")
-        ttk.Label(sweep, textvariable=self.sw_status, foreground="#226622").pack(
-            side="left", padx=10)
-        ttk.Button(sweep, text="Settings…", command=self._open_sweep_settings).pack(side="right")
-        ttk.Button(sweep, text="Run sweep now", style="Run.TButton",
-                   command=self.run_sweep_now).pack(side="right", padx=6)
-
-        panes = ttk.PanedWindow(tab, orient="horizontal")
+    def _tab_apps(self, page) -> None:
+        """Tracker and CV tailor side by side."""
+        self._header(page, "Applications", "track what you applied to, tailor a CV for a job")
+        panes = ttk.PanedWindow(page, orient="horizontal")
         panes.pack(fill="both", expand=True)
-        left = ttk.LabelFrame(panes, text=" My applications ", padding=8)
-        right = ttk.LabelFrame(panes, text=" Tailor CV & cover letter ", padding=8)
+        left = ttk.Frame(panes, padding=(0, 0, 10, 0))
+        right = ttk.Frame(panes, padding=(10, 0, 0, 0))
         panes.add(left, weight=1)
         panes.add(right, weight=1)
+        ttk.Label(left, text="My applications", style="H2.TLabel").pack(anchor="w")
+        ttk.Label(right, text="Tailor CV & cover letter", style="H2.TLabel").pack(anchor="w")
         self._panel_tracker(left)
         self._panel_ats(right)
-        self._sweep_refresh_status()
 
     def _panel_tracker(self, f) -> None:
 
         self.tracker_summary = tk.StringVar(value="")
-        ttk.Label(f, textvariable=self.tracker_summary,
-                  font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
+        ttk.Label(f, textvariable=self.tracker_summary, style="Muted.TLabel",
+                  wraplength=480, justify="left").pack(anchor="w", pady=(2, 0))
 
         wrap = ttk.Frame(f)
         wrap.pack(fill="both", expand=True, pady=(4, 6))
         self.track_tree = ttk.Treeview(wrap, columns=self.TRACK_COLS, show="headings",
                                        height=10, selectmode="browse")
-        widths = {"status": 70, "fit": 34, "title": 220, "company": 110,
-                  "applied": 80, "follow_up": 80, "notes": 120}
+        widths = {"status": 74, "fit": 36, "title": 200, "company": 120,
+                  "applied": 80, "follow_up": 84, "notes": 120}
         for c in self.TRACK_COLS:
             self.track_tree.heading(c, text=c.replace("_", "-").title())
             self.track_tree.column(c, width=widths[c], anchor="w",
-                                   stretch=c in ("title", "notes"))
+                                   stretch=c in ("title", "company"))
+        # Applied date and notes are in the editor below; the table keeps what you scan.
+        self.track_tree.configure(displaycolumns=("status", "fit", "title", "company", "follow_up"))
         vs = ttk.Scrollbar(wrap, orient="vertical", command=self.track_tree.yview)
         self.track_tree.configure(yscrollcommand=vs.set)
         self.track_tree.pack(side="left", fill="both", expand=True)
@@ -910,8 +1174,9 @@ class App(tk.Tk):
         self.track_tree.bind("<<TreeviewSelect>>", self._on_track_select)
         self.track_tree.bind("<Double-1>", lambda _e: self._track_open())
 
-        ed = ttk.Frame(f)
-        ed.pack(fill="x")
+        # The editor appears once an application is selected: empty fields with
+        # nothing to edit were just clutter.
+        self._track_ed = ed = ttk.Frame(f)
         ttk.Label(ed, text="Status").grid(row=0, column=0, sticky="w")
         self.tr_status = ttk.Combobox(ed, values=list(STATUSES), state="readonly", width=11)
         self.tr_status.grid(row=0, column=1, sticky="w", padx=(4, 12))
@@ -926,16 +1191,15 @@ class App(tk.Tk):
         self.tr_notes.grid(row=1, column=1, columnspan=5, sticky="we", padx=(4, 0), pady=(4, 0))
         ed.columnconfigure(5, weight=1)
 
-        bar = ttk.Frame(f)
-        bar.pack(fill="x", pady=(6, 0))
-        ttk.Button(bar, text="Save changes", style="Run.TButton",
+        bar = ttk.Frame(ed)
+        bar.grid(row=2, column=0, columnspan=6, sticky="w", pady=(8, 0))
+        ttk.Button(bar, text="Save", style="Run.TButton",
                    command=self._track_save).pack(side="left")
         ttk.Button(bar, text="Open posting", command=self._track_open).pack(side="left", padx=6)
         ttk.Button(bar, text="Tailor CV →", command=self._track_tailor).pack(side="left")
-        ttk.Label(f, foreground="#555", wraplength=460, justify="left",
-                  text="Right-click jobs in the results to track them. Dates are YYYY-MM-DD; "
-                       "'applied' sets a follow-up 7 days out. Red = follow-up due.").pack(
-            anchor="w", pady=(6, 0))
+        ttk.Label(ed, style="Muted.TLabel", text="Dates as 2026-09-30 · 'applied' sets a "
+                  "follow-up 7 days out · red = follow-up due").grid(
+            row=3, column=0, columnspan=6, sticky="w", pady=(6, 0))
         self.refresh_tracker()
 
     def refresh_tracker(self) -> None:
@@ -955,9 +1219,9 @@ class App(tk.Tk):
                                            job.applied_at, job.follow_up, job.notes))
         parts = [f"{counts[s]} {s}" for s in STATUSES if counts.get(s)]
         self.tracker_summary.set(
-            (" · ".join(parts) or "Nothing tracked yet — right-click a job below and pick a status.")
+            (" · ".join(parts) or "Nothing tracked yet. Under Jobs, select a job and use Track ▾.")
             + (f"   ⚠ {due} follow-up(s) due" if due else ""))
-        self.tabs.tab(self._apps_tab, text=f"  Applications{f' ({due} due)' if due else ''}  ")
+        self.set_badge("apps", f"{due} due" if due else "")
 
     def _track_current(self) -> Job | None:
         sel = self.track_tree.selection()
@@ -969,7 +1233,10 @@ class App(tk.Tk):
     def _on_track_select(self, _e=None) -> None:
         job = self._track_current()
         if not job:
+            self._track_ed.pack_forget()
             return
+        if not self._track_ed.winfo_ismapped():
+            self._track_ed.pack(fill="x")
         self.tr_status.set(job.status)
         for entry, val in ((self.tr_applied, job.applied_at), (self.tr_follow, job.follow_up),
                            (self.tr_notes, job.notes)):
@@ -1011,22 +1278,41 @@ class App(tk.Tk):
         if job:
             self.prefill_ats(job)
 
-    def _on_tab_changed(self, _e=None) -> None:
-        if hasattr(self, "panes"):
-            self._fit_tabs()
-        if self.tabs.select() == str(getattr(self, "_apps_tab", "")):
-            self.refresh_tracker()
-            self._sweep_refresh_status()
-
     # ---------------- tab: daily sweep ----------------
 
     SWEEP_SOURCES = (("ba", "Arbeitsagentur"), ("personio", "Personio"),
                      ("workday", "Workday"), ("research", "Research institutes"),
-                     ("boards", "Employer boards (Graduate tab list)"), ("eures", "EURES"),
+                     ("boards", "Graduate employer boards"), ("eures", "EURES"),
                      ("adzuna_eu", "Adzuna Europe (needs key)"),
                      ("us_asia_boards", "US & Asia employer boards"),
                      ("usajobs", "USAJOBS (needs key)"), ("adzuna", "Adzuna (needs key)"),
                      ("mcf", "MyCareersFuture (SG)"))
+
+    def _section(self, parent, title: str, summary) -> ttk.Frame:
+        """A closed section: a link line 'Title ▸  (summary)' that opens a body frame
+        below it. `summary()` returns the short text shown while it is closed."""
+        head = ttk.Button(parent, style="Link.TButton")
+        head.pack(anchor="w", pady=(8, 0))
+        body = ttk.Frame(parent, padding=(16, 2, 0, 4))
+        state = {"open": False}
+
+        def paint() -> None:
+            text = summary() if callable(summary) else summary
+            arrow = "▾" if state["open"] else "▸"
+            head.configure(text=f"{title} {arrow}" + (f"   ({text})" if text else ""))
+
+        def toggle() -> None:
+            state["open"] = not state["open"]
+            if state["open"]:
+                body.pack(fill="x", after=head)
+            else:
+                body.pack_forget()
+            paint()
+
+        head.configure(command=toggle)
+        body.repaint = paint
+        self.after_idle(paint)
+        return body
 
     def _open_sweep_settings(self) -> None:
         dlg = getattr(self, "_sweep_dlg", None)
@@ -1036,115 +1322,127 @@ class App(tk.Tk):
         dlg = tk.Toplevel(self)
         dlg.title("Daily sweep settings")
         dlg.transient(self)
+        dlg.configure(bg=self.BG)
         self._sweep_dlg = dlg
-        f = ttk.Frame(dlg, padding=12)
+        f = ttk.Frame(dlg, padding=16)
         f.pack(fill="both", expand=True)
         cfg = daily_sweep.load_config()
 
-        left = ttk.Frame(f)
-        left.pack(side="left", fill="y")
-        ttk.Label(left, text="Sources", font=("TkDefaultFont", 10, "bold")).grid(
-            row=0, column=0, sticky="w")
+        ttk.Label(f, text="Daily sweep", style="H2.TLabel").pack(anchor="w")
+        ttk.Label(f, style="Muted.TLabel", wraplength=520, justify="left",
+                  text="Runs every ticked source once a day and flags new jobs that fit you. "
+                       "Open a section below to change what it searches.").pack(
+            anchor="w", pady=(2, 10))
+
+        # ── what most people change: the alert threshold and the schedule ──
+        essentials = ttk.Frame(f)
+        essentials.pack(fill="x")
+        ttk.Label(essentials, text="Alert when fit ≥").grid(row=0, column=0, sticky="w", pady=3)
+        self.sw_min_fit = tk.IntVar(value=int(cfg.get("min_fit", 50)))
+        ttk.Spinbox(essentials, from_=0, to=100, increment=5, textvariable=self.sw_min_fit,
+                    width=4).grid(row=0, column=1, sticky="w", padx=6)
+        ttk.Label(essentials, text="Windows task: run daily at").grid(row=1, column=0, sticky="w",
+                                                                     pady=3)
+        task = ttk.Frame(essentials)
+        task.grid(row=1, column=1, sticky="w", padx=6)
+        self.sw_time = ttk.Entry(task, width=6)
+        self.sw_time.insert(0, "09:00")
+        self.sw_time.pack(side="left")
+        ttk.Button(task, text="Install", command=self._sweep_install).pack(side="left", padx=6)
+        ttk.Button(task, text="Remove", command=self._sweep_uninstall).pack(side="left")
+
+        # ── sources ──
         self.sw_sources: dict[str, tk.BooleanVar] = {}
+
+        def sources_summary() -> str:
+            on = [label.split(" (")[0] for code, label in self.SWEEP_SOURCES
+                  if self.sw_sources[code].get()]
+            if not on:
+                return "none ticked"
+            text = ", ".join(on)
+            return text if len(text) <= 60 else f"{len(on)} of {len(self.SWEEP_SOURCES)} ticked"
+
+        src = self._section(f, "Sources", sources_summary)
         for i, (code, label) in enumerate(self.SWEEP_SOURCES):
             v = tk.BooleanVar(value=bool(cfg["sources"].get(code)))
-            ttk.Checkbutton(left, text=label, variable=v).grid(row=1 + i, column=0, sticky="w")
+            ttk.Checkbutton(src, text=label, variable=v, command=lambda: src.repaint()).grid(
+                row=i // 2, column=i % 2, sticky="w", padx=(0, 18))
             self.sw_sources[code] = v
 
-        opts = ttk.Frame(left)
-        opts.grid(row=1 + len(self.SWEEP_SOURCES), column=0, sticky="w", pady=(10, 0))
-        ttk.Label(opts, text="Alert when fit ≥").grid(row=0, column=0, sticky="w")
-        self.sw_min_fit = tk.IntVar(value=int(cfg.get("min_fit", 50)))
-        ttk.Spinbox(opts, from_=0, to=100, increment=5, textvariable=self.sw_min_fit,
-                    width=4).grid(row=0, column=1, sticky="w", padx=4)
+        # ── startup & notifications ──
         self.sw_notify = tk.BooleanVar(value=bool(cfg.get("notify", True)))
-        ttk.Checkbutton(opts, text="Windows notification", variable=self.sw_notify).grid(
-            row=1, column=0, columnspan=2, sticky="w")
         self.sw_on_start = tk.BooleanVar(value=bool(cfg.get("run_on_app_start", True)))
-        ttk.Checkbutton(opts, text="Run when the app opens (if not run today)",
-                        variable=self.sw_on_start).grid(row=2, column=0, columnspan=2, sticky="w")
 
-        mid = ttk.Frame(f)
-        mid.pack(side="left", fill="both", expand=True, padx=(18, 0))
-        ttk.Label(mid, text="Arbeitsagentur searches  (one per line:  query | near | radius km)").pack(anchor="w")
-        self.sw_ba = tk.Text(mid, height=5, width=52, wrap="none", font=("TkFixedFont", 9))
+        def notes_summary() -> str:
+            parts = [t for t, v in (("notification", self.sw_notify),
+                                    ("runs when the app opens", self.sw_on_start)) if v.get()]
+            return ", ".join(parts) or "both off"
+
+        notes = self._section(f, "Startup & notifications", notes_summary)
+        ttk.Checkbutton(notes, text="Windows notification", variable=self.sw_notify,
+                        command=lambda: notes.repaint()).pack(anchor="w")
+        ttk.Checkbutton(notes, text="Run when the app opens (if not run today)",
+                        variable=self.sw_on_start, command=lambda: notes.repaint()).pack(anchor="w")
+
+        # ── search terms per source ──
+        terms = self._section(f, "Search terms", "Arbeitsagentur, Workday, research, Adzuna, "
+                                                 "US & Asia")
+        ttk.Label(terms, text="Arbeitsagentur searches  (one per line:  query | near | radius km)").pack(anchor="w")
+        self.sw_ba = tk.Text(terms, height=5, width=56, wrap="none", font=("Consolas", 9),
+                             relief="solid", borderwidth=1)
         self.sw_ba.pack(fill="x")
         self.sw_ba.insert("1.0", "\n".join(
             f"{s['query']} | {s.get('where', '')} | {s.get('radius', 0)}"
             for s in cfg["ba"]["searches"]))
-        row = ttk.Frame(mid)
-        row.pack(fill="x", pady=(4, 0))
-        ttk.Label(row, text="Workday searches").pack(side="left")
-        self.sw_wd = ttk.Entry(row, width=36)
-        self.sw_wd.insert(0, ", ".join(cfg["workday"]["queries"]))
-        self.sw_wd.pack(side="left", padx=4)
-        row2 = ttk.Frame(mid)
-        row2.pack(fill="x", pady=(4, 0))
-        ttk.Label(row2, text="Research keywords").pack(side="left")
-        self.sw_res = ttk.Entry(row2, width=36)
-        self.sw_res.insert(0, ", ".join(cfg["research"]["keywords"]))
-        self.sw_res.pack(side="left", padx=4)
+        grid = ttk.Frame(terms)
+        grid.pack(fill="x", pady=(6, 0))
+        pad = dict(sticky="w", pady=2)
 
+        def entry(row: int, label: str, value: str, width: int = 40) -> ttk.Entry:
+            ttk.Label(grid, text=label).grid(row=row, column=0, **pad)
+            e = ttk.Entry(grid, width=width)
+            e.insert(0, value)
+            e.grid(row=row, column=1, columnspan=3, padx=6, **pad)
+            return e
+
+        self.sw_wd = entry(0, "Workday searches", ", ".join(cfg["workday"]["queries"]))
+        self.sw_res = entry(1, "Research keywords", ", ".join(cfg["research"]["keywords"]))
         ae = cfg["adzuna_eu"]
-        row_ae = ttk.Frame(mid)
-        row_ae.pack(fill="x", pady=(4, 0))
-        ttk.Label(row_ae, text="Adzuna Europe roles").pack(side="left")
-        self.sw_ae_roles = ttk.Entry(row_ae, width=24)
-        self.sw_ae_roles.insert(0, ", ".join(ae.get("roles", [])))
-        self.sw_ae_roles.pack(side="left", padx=4)
-        ttk.Label(row_ae, text="field words").pack(side="left")
-        self.sw_ae_fields = ttk.Entry(row_ae, width=24)
-        self.sw_ae_fields.insert(0, ae.get("fields", ""))
-        self.sw_ae_fields.pack(side="left", padx=4)
-        ttk.Label(mid, foreground="#666", text="Adzuna Europe: leave roles or field words "
-                  "empty to use each country's own-language defaults.").pack(anchor="w")
-        row_ae2 = ttk.Frame(mid)
-        row_ae2.pack(fill="x", pady=(4, 0))
-        ttk.Label(row_ae2, text="countries").pack(side="left")
-        self.sw_ae_countries = ttk.Entry(row_ae2, width=10)
+        self.sw_ae_roles = entry(2, "Adzuna Europe roles", ", ".join(ae.get("roles", [])))
+        self.sw_ae_fields = entry(3, "Adzuna field words", ae.get("fields", ""))
+        ttk.Label(grid, text="Adzuna countries").grid(row=4, column=0, **pad)
+        place = ttk.Frame(grid)
+        place.grid(row=4, column=1, columnspan=3, padx=6, **pad)
+        self.sw_ae_countries = ttk.Entry(place, width=12)
         self.sw_ae_countries.insert(0, ", ".join(ae.get("countries", [])))
-        self.sw_ae_countries.pack(side="left", padx=4)
-        ttk.Label(row_ae2, text="near").pack(side="left")
-        self.sw_ae_where = ttk.Entry(row_ae2, width=12)
+        self.sw_ae_countries.pack(side="left")
+        ttk.Label(place, text="near").pack(side="left", padx=(8, 4))
+        self.sw_ae_where = ttk.Entry(place, width=12)
         self.sw_ae_where.insert(0, ae.get("where", ""))
-        self.sw_ae_where.pack(side="left", padx=4)
-        ttk.Label(row_ae2, text="km").pack(side="left")
+        self.sw_ae_where.pack(side="left")
         self.sw_ae_radius = tk.IntVar(value=int(ae.get("radius", 100)))
-        ttk.Spinbox(row_ae2, from_=0, to=300, increment=25, textvariable=self.sw_ae_radius,
-                    width=5).pack(side="left", padx=4)
-        ttk.Label(row_ae2, text="(" + ", ".join(ADZUNA_EUROPE) + ")", foreground="#666").pack(
-            side="left")
-
+        ttk.Spinbox(place, from_=0, to=300, increment=25, textvariable=self.sw_ae_radius,
+                    width=5).pack(side="left", padx=(8, 4))
+        ttk.Label(place, text="km").pack(side="left")
+        ttk.Label(grid, style="Muted.TLabel", wraplength=480, justify="left",
+                  text="Adzuna Europe countries: " + ", ".join(ADZUNA_EUROPE) + ". Leave roles or "
+                       "field words empty to use each country's own-language defaults.").grid(
+            row=5, column=1, columnspan=3, padx=6, sticky="w")
         ua = cfg["us_asia"]
-        row3 = ttk.Frame(mid)
-        row3.pack(fill="x", pady=(4, 0))
-        ttk.Label(row3, text="US & Asia searches").pack(side="left")
-        self.sw_ua_fields = ttk.Entry(row3, width=34)
-        self.sw_ua_fields.insert(0, ", ".join(ua.get("fields", [])))
-        self.sw_ua_fields.pack(side="left", padx=4)
-        row4 = ttk.Frame(mid)
-        row4.pack(fill="x", pady=(4, 0))
-        ttk.Label(row4, text="Adzuna countries").pack(side="left")
+        self.sw_ua_fields = entry(6, "US & Asia searches", ", ".join(ua.get("fields", [])))
+        ttk.Label(grid, text="US & Asia Adzuna").grid(row=7, column=0, **pad)
+        row4 = ttk.Frame(grid)
+        row4.grid(row=7, column=1, columnspan=3, padx=6, **pad)
         self.sw_ua_countries = ttk.Entry(row4, width=14)
         self.sw_ua_countries.insert(0, ", ".join(ua.get("adzuna_countries", [])))
-        self.sw_ua_countries.pack(side="left", padx=4)
-        ttk.Label(row4, text="(us, in, sg, au, nz)   posted within").pack(side="left")
+        self.sw_ua_countries.pack(side="left")
+        ttk.Label(row4, text="(us, in, sg, au, nz)   posted within").pack(side="left", padx=4)
         self.sw_ua_days = tk.IntVar(value=int(ua.get("days", 3)))
-        ttk.Spinbox(row4, from_=1, to=30, textvariable=self.sw_ua_days, width=4).pack(
-            side="left", padx=4)
-        ttk.Label(row4, text="days").pack(side="left")
+        ttk.Spinbox(row4, from_=1, to=30, textvariable=self.sw_ua_days, width=4).pack(side="left")
+        ttk.Label(row4, text="days").pack(side="left", padx=4)
 
-        task = ttk.Frame(mid)
-        task.pack(fill="x", pady=(10, 0))
-        ttk.Label(task, text="Windows task: run daily at").pack(side="left")
-        self.sw_time = ttk.Entry(task, width=6)
-        self.sw_time.insert(0, "09:00")
-        self.sw_time.pack(side="left", padx=4)
-        ttk.Button(task, text="Install", command=self._sweep_install).pack(side="left", padx=4)
-        ttk.Button(task, text="Remove", command=self._sweep_uninstall).pack(side="left")
-
-        btns = ttk.Frame(mid)
-        btns.pack(fill="x", pady=(14, 0))
+        btns = ttk.Frame(f)
+        btns.pack(side="bottom", fill="x", pady=(16, 0))
         ttk.Button(btns, text="Close", command=dlg.destroy).pack(side="right")
         ttk.Button(btns, text="Save", style="Run.TButton",
                    command=lambda: (self._sweep_save(), dlg.destroy())).pack(side="right", padx=6)
@@ -1209,7 +1507,7 @@ class App(tk.Tk):
         except OSError:
             nxt = ""
         parts.append(f"Windows task next {nxt}" if nxt else "no Windows task")
-        self.sw_status.set("  ·  ".join(parts))
+        self.sw_status.set("\n".join(parts))
 
     def _sweep_task(self, force: bool):
         def task(w: Worker) -> None:
@@ -1237,7 +1535,7 @@ class App(tk.Tk):
             return
         if self.worker and self.worker.is_alive():
             return
-        self.log("Daily sweep hasn't run today — starting it now (turn off on the Daily sweep tab).")
+        self.log("Daily sweep hasn't run today — starting it now (turn off under Settings → Daily sweep).")
         self.start("Daily sweep", self._sweep_task(False))
 
     def _sweep_install(self) -> None:
@@ -1401,7 +1699,7 @@ class App(tk.Tk):
                                                            sticky="w", padx=(18, 0))
         ttk.Label(f, foreground="#555", wraplength=720, justify="left",
                   text="US federal jobs from the official USAJOBS API. Needs a free key and the "
-                       "email you registered it with (API keys… in the status bar). Most federal "
+                       "email you registered it with (Settings → API keys). Most federal "
                        "robotics work (NASA, Navy labs, DoE) is ITAR-restricted to US citizens "
                        "or permanent residents.").grid(
             row=2, column=0, columnspan=4, sticky="w", pady=(6, 0))
@@ -1459,7 +1757,7 @@ class App(tk.Tk):
                                                        sticky="w", pady=4)
         ttk.Label(f, foreground="#555", wraplength=720, justify="left",
                   text="Job aggregator covering the US, India, Singapore, Australia and New "
-                       "Zealand. Needs a free app ID and key (API keys… in the status bar).").grid(
+                       "Zealand. Needs a free app ID and key (Settings → API keys).").grid(
             row=3, column=0, columnspan=4, sticky="w", pady=(6, 0))
         ttk.Button(f, text="Search Adzuna", style="Run.TButton",
                    command=self.run_adzuna).grid(row=4, column=1, sticky="w", pady=(12, 0))
@@ -1549,10 +1847,60 @@ class App(tk.Tk):
 
     # ---------------- tab: unit tests ----------------
 
-    def _tab_tests(self) -> None:
-        tab = ttk.Frame(self.tabs, padding=(10, 8))
-        self.tabs.add(tab, text="  Unit tests  ")
+    # ---------------- page: settings ----------------
 
+    def _page_settings(self, page) -> None:
+        self._header(page, "Settings", "set once; the other pages use these")
+        top = ttk.Frame(page)
+        top.pack(fill="x")
+
+        cv = ttk.LabelFrame(top, text=" CV generator (LM Studio) ", padding=10)
+        cv.pack(side="left", fill="both", expand=True, padx=(0, 10))
+        pad = dict(sticky="w", pady=3)
+        # Judge: reads requirements, fact-checks and edits CV bullets. Writer: writes the
+        # cover letter and recruiter message (comma-separate several to draft in
+        # parallel). The pipeline loads both in LM Studio by itself.
+        rows = (("Judge model", "ats_model", DEFAULT_LOCAL_MODELS),
+                ("Letter writer", "ats_writer", DEFAULT_WRITER),
+                ("Server", "ats_base_url", "http://localhost:1234/v1"))
+        for i, (label, attr, default) in enumerate(rows):
+            ttk.Label(cv, text=label).grid(row=i, column=0, **pad)
+            var = tk.StringVar(value=default)
+            setattr(self, attr, var)
+            ttk.Entry(cv, textvariable=var, width=30).grid(row=i, column=1, padx=8, **pad)
+        ttk.Button(cv, text="Detect local models", command=self._ats_detect).grid(
+            row=0, column=2, **pad)
+        ttk.Label(cv, text="Profile").grid(row=3, column=0, **pad)
+        # The shared lookup: the file picked last time, then the data dir and the
+        # .exe's folder. "Next to __file__" inside the .exe is the temporary bundle,
+        # which only ever holds the profile as it was at build time.
+        self.ats_profile_path = tk.StringVar(value=str(default_profile_path()))
+        ttk.Entry(cv, textvariable=self.ats_profile_path, width=30).grid(
+            row=3, column=1, padx=8, **pad)
+        ttk.Button(cv, text="Browse…", command=self._ats_browse_profile).grid(row=3, column=2, **pad)
+
+        other = ttk.LabelFrame(top, text=" Sources & sweep ", padding=10)
+        other.pack(side="left", fill="both", expand=True)
+        ttk.Button(other, text="API keys…", command=self._open_api_keys).grid(row=0, column=0, **pad)
+        ttk.Label(other, text="Adzuna, USAJOBS", style="Muted.TLabel").grid(
+            row=0, column=1, padx=8, **pad)
+        ttk.Button(other, text="Daily sweep…", command=self._open_sweep_settings).grid(
+            row=1, column=0, **pad)
+        ttk.Label(other, text="sources, schedule, Windows task", style="Muted.TLabel").grid(
+            row=1, column=1, padx=8, **pad)
+        ttk.Label(other, text="SEC contact email").grid(row=2, column=0, **pad)
+        self.radar_email = ttk.Entry(other, width=28)
+        self.radar_email.insert(0, _load_settings().get("sec_email", ""))
+        self.radar_email.grid(row=2, column=1, padx=8, **pad)
+        ttk.Label(other, text="asked for by the SEC funding search (New companies)",
+                  style="Muted.TLabel").grid(row=3, column=1, padx=8, sticky="w")
+
+        tests = ttk.Frame(page, padding=(0, 14, 0, 0))
+        tests.pack(fill="both", expand=True)
+        ttk.Label(tests, text="Health checks", style="H2.TLabel").pack(anchor="w")
+        self._tab_tests(tests)
+
+    def _tab_tests(self, tab) -> None:
         bar = ttk.Frame(tab)
         bar.pack(fill="x")
         ttk.Button(bar, text="Run all checks", style="Run.TButton",
@@ -1687,91 +2035,89 @@ class App(tk.Tk):
 
     # ---------------- tab: company radar ----------------
 
-    def _tab_radar(self) -> None:
-        f = ttk.Frame(self.tabs, padding=10)
-        self.tabs.add(f, text="  New companies  ")
+    def _tab_radar(self, f) -> None:
+        self._header(f, "New companies", "employers that are new to you, and their job boards")
         # In the data folder like the jobs DB: a bare "company_radar.db" landed
         # wherever the .exe was started from (e.g. next to it in dist\).
         self.radar = RadarStore(str(_data_dir() / "company_radar.db"))
 
-        ttk.Label(f, text="Field").grid(row=0, column=0, sticky="w", pady=3)
-        self.radar_field = ttk.Combobox(f, values=list(FUNDING_KEYWORDS), width=26)
+        # Three ways to find companies, one small card each.
+        cards = ttk.Frame(f)
+        cards.pack(fill="x")
+
+        def card(title: str, hint: str) -> ttk.Frame:
+            c = ttk.LabelFrame(cards, text=f" {title} ", padding=10)
+            c.pack(side="left", fill="both", expand=True, padx=(0, 10))
+            ttk.Label(c, text=hint, style="Muted.TLabel", wraplength=250,
+                      justify="left").pack(anchor="w", pady=(0, 8))
+            return c
+
+        c1 = card("US funding", "Companies that just raised money (SEC Form D, official and "
+                                "keyless). Empty field = all robotics terms.")
+        row = ttk.Frame(c1)
+        row.pack(anchor="w")
+        self.radar_field = ttk.Combobox(row, values=list(FUNDING_KEYWORDS), width=14)
         self.radar_field.set("robotics")
-        self.radar_field.grid(row=0, column=1, sticky="w", padx=6)
-
-        ttk.Label(f, text="Look back").grid(row=0, column=2, sticky="w", padx=(18, 0))
+        self.radar_field.pack(side="left")
+        ttk.Label(row, text="last").pack(side="left", padx=(8, 4))
         self.radar_months = tk.IntVar(value=6)
-        ttk.Spinbox(f, from_=1, to=24, textvariable=self.radar_months, width=5).grid(
-            row=0, column=3, sticky="w", padx=6)
-        ttk.Label(f, text="months").grid(row=0, column=4, sticky="w")
-        ttk.Label(f, text="SEC contact email").grid(row=0, column=5, sticky="w", padx=(18, 0))
-        self.radar_email = ttk.Entry(f, width=26)
-        self.radar_email.insert(0, _load_settings().get("sec_email", ""))
-        self.radar_email.grid(row=0, column=6, sticky="w", padx=6)
+        ttk.Spinbox(row, from_=1, to=24, textvariable=self.radar_months, width=4).pack(side="left")
+        ttk.Label(row, text="months").pack(side="left", padx=4)
+        ttk.Button(c1, text="Scan funding", style="Run.TButton",
+                   command=self.run_funding).pack(anchor="w", pady=(8, 0))
 
-        row1 = ttk.Frame(f)
-        row1.grid(row=1, column=0, columnspan=7, sticky="w", pady=(6, 0))
-        ttk.Label(row1, text="New employers: jobs from the last").pack(side="left")
+        c2 = card("New in my jobs", "Employers in the jobs you've collected that aren't on a "
+                                    "monitored list. Works for every market.")
+        row = ttk.Frame(c2)
+        row.pack(anchor="w")
+        ttk.Label(row, text="last").pack(side="left")
         self.radar_days = tk.IntVar(value=90)
-        ttk.Spinbox(row1, from_=1, to=365, textvariable=self.radar_days, width=5).pack(
+        ttk.Spinbox(row, from_=1, to=365, textvariable=self.radar_days, width=5).pack(
             side="left", padx=4)
-        ttk.Label(row1, text="days, with at least").pack(side="left")
+        ttk.Label(row, text="days, ≥").pack(side="left")
         self.radar_min_roles = tk.IntVar(value=1)
-        ttk.Spinbox(row1, from_=1, to=20, textvariable=self.radar_min_roles, width=4).pack(
+        ttk.Spinbox(row, from_=1, to=20, textvariable=self.radar_min_roles, width=4).pack(
             side="left", padx=4)
-        ttk.Label(row1, text="role(s)").pack(side="left")
-        ttk.Label(row1, text="Probe these names").pack(side="left", padx=(18, 4))
-        self.radar_probe_names = ttk.Entry(row1, width=30)
-        self.radar_probe_names.pack(side="left")
+        ttk.Label(row, text="roles").pack(side="left")
+        ttk.Button(c2, text="Find employers", command=self.run_emerging).pack(anchor="w", pady=(8, 0))
 
-        btns = ttk.Frame(f)
-        btns.grid(row=2, column=0, columnspan=7, sticky="w", pady=(10, 0))
-        ttk.Button(btns, text="1 · US funding (SEC Form D)", style="Run.TButton",
-                   command=self.run_funding).pack(side="left", padx=(0, 8))
-        ttk.Button(btns, text="2 · New employers in my results",
-                   command=self.run_emerging).pack(side="left", padx=8)
-        ttk.Button(btns, text="3 · Probe for job boards",
-                   command=self.run_probe).pack(side="left", padx=8)
+        c3 = card("Find their job boards", "Checks these names (or, if empty, every company "
+                                           "below without a board) for a public job board.")
+        self.radar_probe_names = ttk.Entry(c3, width=30)
+        self.radar_probe_names.pack(anchor="w", fill="x")
+        ttk.Button(c3, text="Probe", command=self.run_probe).pack(anchor="w", pady=(8, 0))
 
-        ttk.Label(f, foreground="#555", wraplength=680, justify="left",
-                  text=("Form D is the notice every US company files when it raises private "
-                        "capital — official, keyless SEC data. Leave Field empty to scan all the "
-                        "standard robotics terms. The SEC asks for a contact email with each "
-                        "request. 'New employers' scans the jobs you've already collected for "
-                        "companies not on the monitored list, which works for every market. "
-                        "'Probe' checks the names you typed, or else every tracked company "
-                        "without a board, for a live job board.")
-                  ).grid(row=3, column=0, columnspan=7, sticky="w", pady=(10, 0))
+        bar = ttk.Frame(f)
+        bar.pack(fill="x", pady=(14, 6))
+        ttk.Label(bar, text="Show").pack(side="left")
+        self.radar_signal = ttk.Combobox(bar, width=11, state="readonly",
+                                         values=["all", "funding", "emerging", "probe", "discovered"])
+        self.radar_signal.set("all")
+        self.radar_signal.pack(side="left", padx=6)
+        self.radar_signal.bind("<<ComboboxSelected>>", lambda _e: self.load_radar())
+        self.radar_summary = tk.StringVar(value="")
+        ttk.Label(bar, textvariable=self.radar_summary, style="Muted.TLabel").pack(side="left", padx=8)
+        m = tk.Menu(bar, tearoff=False)
+        m.add_command(label="Export watchlist CSV…", command=self.export_radar)
+        m.add_command(label="Copy board entries (for robotics_track.py)",
+                      command=self.copy_radar_boards)
+        self._menu_button(bar, "More ▾", m).pack(side="right")
 
         wrap = ttk.Frame(f)
-        wrap.grid(row=4, column=0, columnspan=7, sticky="nsew", pady=(10, 0))
+        wrap.pack(fill="both", expand=True)
         cols = ("name", "market", "signal", "detail", "board")
         self.radar_tree = ttk.Treeview(wrap, columns=cols, show="headings", height=9)
-        for c, wd in zip(cols, (230, 60, 80, 270, 150)):
+        for c, wd in zip(cols, (220, 60, 80, 380, 140)):
             self.radar_tree.heading(c, text=c.title())
-            self.radar_tree.column(c, width=wd, anchor="w")
+            self.radar_tree.column(c, width=wd, anchor="w", stretch=c in ("name", "detail"))
         sb = ttk.Scrollbar(wrap, orient="vertical", command=self.radar_tree.yview)
         self.radar_tree.configure(yscrollcommand=sb.set)
         self.radar_tree.pack(side="left", fill="both", expand=True)
         sb.pack(side="left", fill="y")
         self.radar_tree.bind("<Double-1>", lambda _e: self.open_radar_row())
         self.radar_tree.tag_configure("hiring", background="#eef7ee")
-
-        bottom = ttk.Frame(f)
-        bottom.grid(row=5, column=0, columnspan=7, sticky="w", pady=(8, 0))
-        ttk.Button(bottom, text="Export watchlist CSV",
-                   command=self.export_radar).pack(side="left")
-        ttk.Button(bottom, text="Copy board entries",
-                   command=self.copy_radar_boards).pack(side="left", padx=6)
-        ttk.Label(bottom, text="Show").pack(side="left", padx=(18, 4))
-        self.radar_signal = ttk.Combobox(bottom, width=10, state="readonly",
-                                         values=["all", "funding", "emerging", "probe"])
-        self.radar_signal.set("all")
-        self.radar_signal.pack(side="left")
-        self.radar_signal.bind("<<ComboboxSelected>>", lambda _e: self.load_radar())
-        self.radar_summary = tk.StringVar(value="")
-        ttk.Label(bottom, textvariable=self.radar_summary, foreground="#555").pack(
-            side="left", padx=12)
+        ttk.Label(f, text="Double-click a company to open its job board or source.",
+                  style="Muted.TLabel").pack(anchor="w", pady=(4, 0))
         self.load_radar()
 
     def copy_radar_boards(self) -> None:
@@ -1903,7 +2249,7 @@ class App(tk.Tk):
 
         self.start(f"Probing {len(pending)} companies", task)
 
-    # ------------------------------------- CV & cover-letter generator (Applications tab)
+    # ------------------------------------- CV & cover-letter generator (Applications page)
 
     # Region auto-map: job source / country code → ATS region code
     _ATS_REGION_MAP = {
@@ -1931,86 +2277,74 @@ class App(tk.Tk):
     }
 
     def _panel_ats(self, f) -> None:
-        # ── controls, laid out for half the window width ──────────────────
-        ctl = ttk.Frame(f)
-        ctl.pack(fill="x", pady=(0, 6))
-        pad = dict(sticky="w", pady=2)
-
-        ttk.Label(ctl, text="Region").grid(row=0, column=0, **pad)
-        self.ats_region = tk.StringVar(value=DEFAULT_REGION)
-        ttk.Combobox(ctl, textvariable=self.ats_region, values=sorted(ATS_REGIONS), width=7,
-                     state="readonly").grid(row=0, column=1, padx=(4, 12), **pad)
-        ttk.Label(ctl, text="Style").grid(row=0, column=2, **pad)
-        self.ats_style = tk.StringVar(value="both")
-        ttk.Combobox(ctl, textvariable=self.ats_style, values=["ats", "styled", "both"],
-                     width=7, state="readonly").grid(row=0, column=3, padx=(4, 12), **pad)
-        self.ats_review = tk.BooleanVar(value=True)
-        ttk.Checkbutton(ctl, text="Review plan", variable=self.ats_review).grid(
-            row=1, column=6, sticky="w", pady=2)
-        self.ats_cover = tk.BooleanVar(value=True)
-        ttk.Checkbutton(ctl, text="Cover letter", variable=self.ats_cover).grid(
-            row=0, column=5, **pad)
-        self.ats_compile = tk.BooleanVar(value=False)
-        ttk.Checkbutton(ctl, text="Compile PDF", variable=self.ats_compile).grid(
-            row=0, column=4, **pad)
-
-        ttk.Label(ctl, text="Model").grid(row=1, column=0, **pad)
-        # the default pair; the pipeline loads it in LM Studio by itself
-        self.ats_model = tk.StringVar(value=DEFAULT_LOCAL_MODELS)
-        ttk.Entry(ctl, textvariable=self.ats_model, width=40).grid(
-            row=1, column=1, columnspan=4, padx=4, **pad)
-        ttk.Button(ctl, text="Detect local", command=self._ats_detect).grid(
-            row=1, column=5, **pad)
-
-        ttk.Label(ctl, text="Server").grid(row=2, column=0, **pad)
-        self.ats_base_url = tk.StringVar(value="http://localhost:1234/v1")
-        ttk.Entry(ctl, textvariable=self.ats_base_url, width=24).grid(
-            row=2, column=1, columnspan=2, padx=4, **pad)
-        ttk.Label(ctl, text="Recruiter").grid(row=2, column=3, **pad)
-        self.ats_recruiter = tk.StringVar()
-        ttk.Entry(ctl, textvariable=self.ats_recruiter, width=18).grid(
-            row=2, column=4, columnspan=2, padx=4, **pad)
-
-        ttk.Label(ctl, text="Profile").grid(row=3, column=0, **pad)
-        # The shared lookup: the file picked last time, then the data dir and the
-        # .exe's folder. "Next to __file__" inside the .exe is the temporary bundle,
-        # which only ever holds the profile as it was at build time.
-        self.ats_profile_path = tk.StringVar(value=str(default_profile_path()))
-        ttk.Entry(ctl, textvariable=self.ats_profile_path, width=40).grid(
-            row=3, column=1, columnspan=4, padx=4, **pad)
-        ttk.Button(ctl, text="Browse…", command=self._ats_browse_profile).grid(
-            row=3, column=5, **pad)
-
+        # Judge, writer, server and profile are set once under Settings; here only
+        # what changes from job to job.
         # ── job description ───────────────────────────────────────────────
-        ttk.Label(f, text="Job description — paste it, or double-click a job in the results").pack(anchor="w")
-        self.ats_jd = tk.Text(f, height=8, wrap="word", undo=True,
-                               font=("TkDefaultFont", 10))
-        self.ats_jd.pack(fill="both", expand=True, pady=(2, 6))
-
-        # ── extra notes ───────────────────────────────────────────────────
-        ttk.Label(f, text="Extra truthful context for the cover letter (optional)").pack(anchor="w")
-        self.ats_notes = tk.Text(f, height=2, wrap="word")
-        self.ats_notes.pack(fill="x", pady=(2, 6))
+        ttk.Label(f, text="Paste the job description, or double-click a job under Jobs.",
+                  style="Muted.TLabel").pack(anchor="w", pady=(2, 4))
+        self.ats_jd = tk.Text(f, height=10, wrap="word", undo=True, relief="solid",
+                              borderwidth=1, highlightthickness=0, font=("Segoe UI", 10))
+        self.ats_jd.pack(fill="both", expand=True)
 
         # ── action bar ────────────────────────────────────────────────────
-        bar = ttk.Frame(f)
-        bar.pack(fill="x", pady=(0, 4))
-        ttk.Button(bar, text="Load JD…",
-                   command=self._ats_load_jd).pack(side="left")
-        ttk.Button(bar, text="Outputs folder",
-                   command=self._ats_open_outputs).pack(side="left", padx=6)
-        ttk.Button(bar, text="Clear JD",
-                   command=lambda: self.ats_jd.delete("1.0", "end")).pack(side="left")
-        ttk.Button(bar, text="Fit score",
-                   command=self._ats_fit_score).pack(side="left", padx=6)
-        self.ats_go = ttk.Button(bar, text="Generate",
-                                  style="Run.TButton", command=self._ats_generate)
+        self._ats_bar = bar = ttk.Frame(f)
+        bar.pack(fill="x", pady=(8, 0))
+        self.ats_go = ttk.Button(bar, text="Generate", style="Run.TButton",
+                                 command=self._ats_generate)
         self.ats_go.pack(side="right")
+        ttk.Button(bar, text="Fit score", command=self._ats_fit_score).pack(side="right", padx=6)
+        m = tk.Menu(bar, tearoff=False)
+        m.add_command(label="Load job description from file…", command=self._ats_load_jd)
+        m.add_command(label="Clear job description",
+                      command=lambda: self.ats_jd.delete("1.0", "end"))
+        m.add_separator()
+        m.add_command(label="Open outputs folder", command=self._ats_open_outputs)
+        self._menu_button(bar, "More ▾", m).pack(side="left")
+        self._ats_opts_btn = ttk.Button(bar, text="Options ▸", style="Link.TButton",
+                                        command=self._toggle_ats_options)
+        self._ats_opts_btn.pack(side="left", padx=8)
+
+        # ── options, folded away ──────────────────────────────────────────
+        self._ats_opts = opts = ttk.Frame(f, padding=(0, 8, 0, 0))
+        pad = dict(sticky="w", pady=3)
+        ttk.Label(opts, text="Region").grid(row=0, column=0, **pad)
+        self.ats_region = tk.StringVar(value=DEFAULT_REGION)
+        ttk.Combobox(opts, textvariable=self.ats_region, values=sorted(ATS_REGIONS), width=7,
+                     state="readonly").grid(row=0, column=1, padx=(6, 16), **pad)
+        ttk.Label(opts, text="CV style").grid(row=0, column=2, **pad)
+        self.ats_style = tk.StringVar(value="both")
+        ttk.Combobox(opts, textvariable=self.ats_style, values=["ats", "styled", "both"],
+                     width=7, state="readonly").grid(row=0, column=3, padx=(6, 16), **pad)
+        self.ats_review = tk.BooleanVar(value=True)
+        self.ats_cover = tk.BooleanVar(value=True)
+        self.ats_compile = tk.BooleanVar(value=False)
+        checks_row = ttk.Frame(opts)
+        checks_row.grid(row=1, column=0, columnspan=4, **pad)
+        for text, var in (("Cover letter", self.ats_cover), ("Review plan first", self.ats_review),
+                          ("Compile PDF", self.ats_compile)):
+            ttk.Checkbutton(checks_row, text=text, variable=var).pack(side="left", padx=(0, 14))
+        ttk.Label(opts, text="Recruiter name").grid(row=2, column=0, **pad)
+        self.ats_recruiter = tk.StringVar()
+        ttk.Entry(opts, textvariable=self.ats_recruiter, width=26).grid(
+            row=2, column=1, columnspan=3, padx=6, **pad)
+        ttk.Label(opts, text="Extra truthful context for the cover letter").grid(
+            row=3, column=0, columnspan=4, **pad)
+        self.ats_notes = tk.Text(opts, height=2, wrap="word", relief="solid", borderwidth=1)
+        self.ats_notes.grid(row=4, column=0, columnspan=4, sticky="we")
+        opts.columnconfigure(3, weight=1)
 
         # ── last result summary ───────────────────────────────────────────
-        self.ats_result_var = tk.StringVar(value="No output yet.")
-        ttk.Label(f, textvariable=self.ats_result_var,
-                  foreground="#226622").pack(anchor="w", pady=(2, 0))
+        self.ats_result_var = tk.StringVar(value="")
+        ttk.Label(f, textvariable=self.ats_result_var, foreground="#226622",
+                  wraplength=480, justify="left").pack(anchor="w", pady=(6, 0))
+
+    def _toggle_ats_options(self) -> None:
+        if self._ats_opts.winfo_ismapped():
+            self._ats_opts.pack_forget()
+            self._ats_opts_btn.configure(text="Options ▸")
+        else:
+            self._ats_opts.pack(fill="x", after=self._ats_bar)
+            self._ats_opts_btn.configure(text="Options ▾")
 
     # ── ATS helpers ──────────────────────────────────────────────────────────
 
@@ -2046,6 +2380,11 @@ class App(tk.Tk):
         else:
             head = "Job requirements could not be read; using keyword matching only."
         ttk.Label(f, text=head, font=("TkDefaultFont", 10, "bold")).pack(anchor="w")
+        # A missing degree or language level can rule the application out on its own,
+        # so it is shown before anything is written.
+        for w in prepared["keywords"].get("hard", []):
+            ttk.Label(f, text=f"⚠ {w[0].upper()}{w[1:]}", foreground="#b00020",
+                      wraplength=780, justify="left").pack(anchor="w", pady=(2, 0))
 
         cols = ("status", "priority", "skill", "proof")
         tree = ttk.Treeview(f, columns=cols, show="headings", height=9)
@@ -2161,7 +2500,7 @@ class App(tk.Tk):
         self.log(f"[fit] {title[:60]}: {summary}")
 
     def _ats_open_outputs(self) -> None:
-        folder = getattr(self, "_ats_last_out", None) or (_data_dir() / "ats_outputs")
+        folder = getattr(self, "_ats_last_out", None) or outputs_dir()
         Path(folder).mkdir(parents=True, exist_ok=True)
         if os.name == "nt":
             os.startfile(str(folder))
@@ -2171,7 +2510,7 @@ class App(tk.Tk):
     def prefill_ats(self, job: Job) -> None:
         """Called when the user double-clicks a job row.
 
-        Switches to the Applications tab, fills the job description box with whatever
+        Switches to the Applications page, fills the job description box with whatever
         description we have, and auto-selects the best region.
         """
         # Build a JD text from what we have stored
@@ -2203,7 +2542,7 @@ class App(tk.Tk):
         region = self._infer_ats_region(job)
         self.ats_region.set(region)
 
-        self.tabs.select(self._apps_tab)
+        self.show_page("apps")
         self.log(f"[ATS] Pre-filled from: {job.title} @ {job.company} → region {region}")
 
     def _infer_ats_region(self, job: Job) -> str:
@@ -2258,13 +2597,14 @@ class App(tk.Tk):
         region    = self.ats_region.get()
         style     = self.ats_style.get()
         model     = self.ats_model.get().strip()
+        writer    = self.ats_writer.get().strip()
         recruiter = self.ats_recruiter.get().strip()
         notes     = self.ats_notes.get("1.0", "end").strip()
         compile_  = self.ats_compile.get()
         cover     = self.ats_cover.get()
         review    = self.ats_review.get()
         base_url  = self.ats_base_url.get().strip() or None   # read here, not in the worker
-        out_root  = _data_dir() / "ats_outputs"
+        out_root  = outputs_dir()
 
         def task(w: Worker) -> None:
             try:
@@ -2277,6 +2617,7 @@ class App(tk.Tk):
                     recruiter=recruiter,
                     notes=notes,
                     model=model,
+                    writers=writer,
                     base_url=base_url,
                     compile_pdf=compile_,
                     cover=cover,
@@ -2300,8 +2641,11 @@ class App(tk.Tk):
                 # Bind the text now: Python unbinds `e` when the except block ends,
                 # so a lambda reading it later would raise NameError.
                 err = str(e)
-                self._ui(lambda: self.ats_result_var.set("Failed — see activity log"))
-                self._ui(lambda: messagebox.showerror("ATS pipeline failed", err))
+                if err.startswith("Cancelled"):     # you pressed Cancel: not a failure
+                    self._ui(lambda: self.ats_result_var.set("Cancelled - nothing was written."))
+                else:
+                    self._ui(lambda: self.ats_result_var.set("Failed — see activity log"))
+                    self._ui(lambda: messagebox.showerror("ATS pipeline failed", err))
             finally:
                 self._ui(lambda: self.ats_go.configure(state="normal"))
 
@@ -2323,7 +2667,7 @@ class App(tk.Tk):
             v = tk.BooleanVar(value=code in preset)
             name = MARKETS[code].name if code in MARKETS else code
             ttk.Checkbutton(frame, text=f"{code} {name}", variable=v).grid(
-                row=i // 5, column=i % 5, sticky="w", padx=(0, 14))
+                row=i // 4, column=i % 4, sticky="w", padx=(0, 14))
             vars_[code] = v
         return vars_
 
@@ -2337,44 +2681,52 @@ class App(tk.Tk):
 
     def _results(self, parent) -> None:
         bar = ttk.Frame(parent)
-        bar.pack(fill="x", pady=(8, 4))
-        ttk.Label(bar, text="Filter").pack(side="left")
+        bar.pack(fill="x", pady=(0, 8))
         self.filter_var = tk.StringVar()
         e = ttk.Entry(bar, textvariable=self.filter_var, width=24)
-        e.pack(side="left", padx=6)
+        e.pack(side="left")
         e.bind("<KeyRelease>", lambda _e: self.apply_filter())
+        self.bind_all("<Control-f>", lambda _e: (self.show_page("jobs"), e.focus_set()))
+        self._placeholder(e, "Search jobs…")
 
-        self.fresh_only = tk.BooleanVar(value=False)
-        ttk.Checkbutton(bar, text="Posted < 24h", variable=self.fresh_only,
-                        command=self.apply_filter).pack(side="left", padx=(6, 2))
-        ttk.Label(bar, text="Min fit").pack(side="left", padx=(8, 2))
+        # Show: one choice instead of separate checkboxes and spinboxes.
+        self.show_var = tk.StringVar(value="all")
+        seg = ttk.Frame(bar)
+        seg.pack(side="left", padx=(12, 0))
+        for value, text in (("all", "All"), ("new", "New"), ("24h", "Last 24h"),
+                            ("tracked", "Tracked")):
+            ttk.Radiobutton(seg, text=text, value=value, variable=self.show_var,
+                            style="Seg.Toolbutton", command=self.apply_filter).pack(side="left")
+        ttk.Label(bar, text="Fit ≥").pack(side="left", padx=(14, 4))
         self.min_fit = tk.IntVar(value=0)
-        sb = ttk.Spinbox(bar, from_=0, to=100, increment=10, width=4,
-                         textvariable=self.min_fit, command=self.apply_filter)
-        sb.pack(side="left")
-        sb.bind("<KeyRelease>", lambda _e: self.apply_filter())
+        fit = ttk.Combobox(bar, textvariable=self.min_fit, values=[0, 40, 50, 60, 70], width=4,
+                           state="readonly")
+        fit.pack(side="left")
+        fit.bind("<<ComboboxSelected>>", lambda _e: self.apply_filter())
 
-        track = ttk.Menubutton(bar, text="Track selected ▾")
-        menu = tk.Menu(track, tearoff=False)
-        for st in STATUSES:
-            menu.add_command(label=st.title(), command=lambda s=st: self.set_selected_status(s))
+        menu = tk.Menu(bar, tearoff=False)
+        menu.add_command(label="Export visible jobs…", command=self.export)
+        menu.add_command(label="Summary (in the activity log)", command=self.show_summary)
+        menu.add_command(label="Re-score against my profile", command=self.rescore_all)
+        menu.add_command(label="Reload", command=self.load_saved)
         menu.add_separator()
-        menu.add_command(label="Stop tracking", command=lambda: self.set_selected_status(""))
-        track["menu"] = menu
-        track.pack(side="left", padx=(12, 4))
-
-        ttk.Button(bar, text="Open", command=self.open_selected).pack(side="left", padx=4)
-        ttk.Button(bar, text="Export", command=self.export).pack(side="left", padx=4)
-        ttk.Button(bar, text="Reload", command=self.load_saved).pack(side="left", padx=4)
-        ttk.Button(bar, text="Re-score", command=self.rescore_all).pack(side="left", padx=4)
-        ttk.Button(bar, text="Summary", command=self.show_summary).pack(side="left", padx=4)
-        ttk.Button(bar, text="Clear untracked", command=self.clear_db).pack(side="right")
+        menu.add_command(label="Delete untracked jobs…", command=self.clear_db)
+        self._menu_button(bar, "More ▾", menu).pack(side="right")
+        tmenu = tk.Menu(bar, tearoff=False)
+        for st in STATUSES:
+            tmenu.add_command(label=st.title(), command=lambda s=st: self.set_selected_status(s))
+        tmenu.add_separator()
+        tmenu.add_command(label="Stop tracking", command=lambda: self.set_selected_status(""))
+        self._menu_button(bar, "Track ▾", tmenu).pack(side="right", padx=6)
+        ttk.Button(bar, text="Open", command=self.open_selected).pack(side="right")
+        ttk.Button(bar, text="Tailor CV", style="Run.TButton",
+                   command=self._ctx_tailor).pack(side="right", padx=6)
 
         wrap = ttk.Frame(parent)
         wrap.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(wrap, columns=self.COLS, show="headings", selectmode="extended")
-        widths = {"fit": 46, "title": 360, "company": 170, "location": 160,
-                  "type": 110, "posted": 92, "status": 80}
+        widths = {"fit": 44, "title": 300, "company": 150, "location": 140,
+                  "type": 90, "posted": 84, "status": 70}
         for c in self.COLS:
             self.tree.heading(c, text=c.title(), command=lambda cc=c: self.sort_by(cc))
             self.tree.column(c, width=widths[c], anchor="center" if c == "fit" else "w",
@@ -2390,8 +2742,12 @@ class App(tk.Tk):
         self.tree.tag_configure("fresh", foreground="#0b6b2e")
         self.tree.tag_configure("tracked", background="#eef2fb")
 
-        self.fit_detail = tk.StringVar(value="Select a job to see why it scored what it did.")
-        ttk.Label(parent, textvariable=self.fit_detail, foreground="#555").pack(anchor="w", pady=(2, 0))
+        self.fit_detail = tk.StringVar(
+            value="Double-click a job to tailor a CV for it · Ctrl+double-click opens the posting "
+                  "· right-click to track it")
+        ttk.Label(parent, textvariable=self.fit_detail, style="Muted.TLabel",
+                  wraplength=1000, justify="left").pack(anchor="w", pady=(6, 0))
+        self._new_ids: set[str] = set()
 
         self.ctx_menu = tk.Menu(self, tearoff=False)
         self.ctx_menu.add_command(label="Open in browser", command=self.open_selected)
@@ -2400,6 +2756,38 @@ class App(tk.Tk):
         for st in STATUSES:
             self.ctx_menu.add_command(label=f"Mark {st}", command=lambda s=st: self.set_selected_status(s))
         self.ctx_menu.add_command(label="Stop tracking", command=lambda: self.set_selected_status(""))
+
+    def _menu_button(self, parent, text: str, menu: tk.Menu) -> ttk.Button:
+        """A normal button that drops a menu: ttk's Menubutton draws a wide combobox-like
+        arrow box in this theme."""
+        btn = ttk.Button(parent, text=text)
+        btn.configure(command=lambda: menu.tk_popup(btn.winfo_rootx(),
+                                                    btn.winfo_rooty() + btn.winfo_height()))
+        return btn
+
+    def _placeholder(self, entry: ttk.Entry, text: str) -> None:
+        """Grey hint text in an empty entry, instead of a label beside it."""
+        var = entry.cget("textvariable")
+
+        def show(_e=None) -> None:
+            if not entry.get():
+                entry.insert(0, text)
+                entry.configure(foreground=self.MUTED)
+
+        def hide(_e=None) -> None:
+            if str(entry.cget("foreground")) == self.MUTED:
+                entry.delete(0, "end")
+                entry.configure(foreground=self.TEXT)
+
+        entry.bind("<FocusIn>", hide, add="+")
+        entry.bind("<FocusOut>", show, add="+")
+        self._hints = getattr(self, "_hints", {})
+        self._hints[str(var)] = text
+        show()
+
+    def _filter_text(self) -> str:
+        text = self.filter_var.get()
+        return "" if text == getattr(self, "_hints", {}).get(str(self.filter_var), None) else text
 
     # ---------------- results helpers ----------------
 
@@ -2425,12 +2813,17 @@ class App(tk.Tk):
         return tuple(tags)
 
     def _passes(self, job: Job) -> bool:
-        needle = self.filter_var.get().lower().strip()
+        needle = self._filter_text().lower().strip()
         if needle:
             hay = f"{job.title} {job.company} {job.location} {job.employment_type} {job.status}".lower()
             if needle not in hay:
                 return False
-        if self.fresh_only.get():
+        show = self.show_var.get()
+        if show == "new" and job.job_id not in self._new_ids:
+            return False
+        if show == "tracked" and not job.status:
+            return False
+        if show == "24h":
             a = age_hours(job)
             if a is None or a > 24:
                 return False
@@ -2442,26 +2835,44 @@ class App(tk.Tk):
             return False
         return True
 
-    # ---------------- console ----------------
+    # ---------------- activity log & status bar ----------------
 
     def _console(self, parent) -> None:
-        ttk.Label(parent, text="Activity").pack(anchor="w", pady=(6, 2))
-        self.console = tk.Text(parent, height=8, wrap="word", font=("TkFixedFont", 9))
-        cs = ttk.Scrollbar(parent, orient="vertical", command=self.console.yview)
+        """The activity log, hidden until asked for: the status bar shows its last line."""
+        self._log_box = box = ttk.Frame(parent, padding=(18, 0, 18, 0))
+        self.console = tk.Text(box, height=9, wrap="word", font=("Consolas", 9), relief="flat",
+                               bg="#111827", fg="#d1d5db", insertbackground="white",
+                               padx=8, pady=6)
+        cs = ttk.Scrollbar(box, orient="vertical", command=self.console.yview)
         self.console.configure(yscrollcommand=cs.set, state="disabled")
         self.console.pack(side="left", fill="both", expand=True)
         cs.pack(side="left", fill="y")
 
+    def toggle_log(self) -> None:
+        if self._log_box.winfo_ismapped():
+            self._log_box.pack_forget()
+            self._log_btn.configure(text="Activity log ▴")
+        else:
+            self._log_box.pack(side="bottom", fill="x", pady=(0, 4))
+            self._log_btn.configure(text="Activity log ▾")
+
     def _statusbar(self, parent) -> None:
-        bar = ttk.Frame(parent)
-        bar.pack(side="bottom", fill="x", pady=(6, 0))
+        line = tk.Frame(parent, bg=self.LINE, height=1)
+        bar = ttk.Frame(parent, padding=(18, 6, 18, 8))
+        bar.pack(side="bottom", fill="x")
+        line.pack(side="bottom", fill="x")
         self.status = tk.StringVar(value="Ready")
-        ttk.Label(bar, textvariable=self.status).pack(side="left")
-        self.progress = ttk.Progressbar(bar, mode="indeterminate", length=180)
-        self.progress.pack(side="right")
+        ttk.Label(bar, textvariable=self.status, style="H2.TLabel").pack(side="left")
+        self.last_msg = tk.StringVar(value="")
+        ttk.Label(bar, textvariable=self.last_msg, style="Muted.TLabel").pack(
+            side="left", padx=(14, 0))
+        self._log_btn = ttk.Button(bar, text="Activity log ▴", style="Link.TButton",
+                                   command=self.toggle_log)
+        self._log_btn.pack(side="right")
+        self.progress = ttk.Progressbar(bar, mode="indeterminate", length=140)
+        self.progress.pack(side="right", padx=10)
         self.cancel_btn = ttk.Button(bar, text="Stop", command=self.cancel, state="disabled")
-        self.cancel_btn.pack(side="right", padx=8)
-        ttk.Button(bar, text="API keys…", command=self._open_api_keys).pack(side="right")
+        self.cancel_btn.pack(side="right")
 
     # ---------------- plumbing ----------------
 
@@ -2470,6 +2881,10 @@ class App(tk.Tk):
         self.console.insert("end", f"{datetime.now():%H:%M:%S}  {msg}\n")
         self.console.see("end")
         self.console.configure(state="disabled")
+        first = msg.strip().splitlines()[0] if msg.strip() else ""
+        self.last_msg.set(first if len(first) <= 110 else first[:107] + "…")
+        if msg.startswith("ERROR") and not self._log_box.winfo_ismapped():
+            self.toggle_log()
 
     def _drain(self) -> None:
         try:
@@ -2498,10 +2913,18 @@ class App(tk.Tk):
         if iid in self.rows:
             return
         self.rows[iid] = job
+        if new:
+            self._new_ids.add(iid)
         if self._passes(job):
             self.tree.insert("", "end", iid=iid, tags=self._tags(job, new),
                              values=self._values(job))
-        self.status.set(f"{len(self.rows)} roles")
+        self._count_badges()
+
+    def _count_badges(self) -> None:
+        new = len(self._new_ids)
+        self.set_badge("jobs", f"{len(self.rows)}" + (f"  +{new}" if new else ""))
+        if not (self.worker and self.worker.is_alive()):
+            self.status.set(f"{len(self.rows)} jobs")
 
     def start(self, label: str, fn) -> None:
         if self.worker and self.worker.is_alive():
@@ -2511,13 +2934,17 @@ class App(tk.Tk):
         self.status.set(label)
         self.progress.start(12)
         self.cancel_btn.configure(state="normal")
+        # A job search started from Find jobs: watch the results come in.
+        if self._page == "find":
+            self.show_page("jobs")
         self.worker = Worker(fn, self.events)
         self.worker.start()
 
     def _finish(self) -> None:
         self.progress.stop()
         self.cancel_btn.configure(state="disabled")
-        self.status.set(f"Done — {len(self.rows)} roles")
+        new = len(self._new_ids)
+        self.status.set(f"Done — {len(self.rows)} jobs" + (f", {new} new" if new else ""))
         self.log("finished")
 
     def cancel(self) -> None:
@@ -2689,9 +3116,9 @@ class App(tk.Tk):
         for iid, job in self.rows.items():
             if self._passes(job):
                 self.tree.insert("", "end", iid=iid, values=self._values(job),
-                                 tags=self._tags(job, False))
+                                 tags=self._tags(job, iid in self._new_ids))
         self._sort(*getattr(self, "_last_sort", ("fit", True)))
-        self.status.set(f"{len(self.tree.get_children(''))} of {len(self.rows)} roles shown")
+        self.status.set(f"{len(self.tree.get_children(''))} of {len(self.rows)} jobs shown")
 
     def _sort(self, col: str, reverse: bool) -> None:
         def key(k):
@@ -2802,7 +3229,7 @@ class App(tk.Tk):
         self.log(f"  top companies: {top(by_company)}")
 
     def _on_result_double_click(self, event) -> None:
-        """First double-click: pre-fill ATS tab. Ctrl+double-click: open URL."""
+        """First double-click: pre-fill the CV tailor (Applications). Ctrl+double-click: open URL."""
         iid = self.tree.identify_row(event.y)
         if not iid:
             return
@@ -2863,6 +3290,7 @@ def ats_headless(argv: list) -> int:
     p.add_argument("--profile", default=None)
     # "modelA,modelB": the first judges, every listed model drafts the cover letter
     p.add_argument("--model", default=DEFAULT_LOCAL_MODELS)
+    p.add_argument("--writer", default=DEFAULT_WRITER)
     args, _ = p.parse_known_args(argv)
     log_file = _data_dir() / "ats_headless.log"
     with open(log_file, "w", encoding="utf-8") as fh:
@@ -2875,9 +3303,9 @@ def ats_headless(argv: list) -> int:
                                                if is_bundled_copy(profile) else ""))
             jd = Path(args.ats).read_text(encoding="utf-8")
             pkg, out = ats_run(jd, args.region, profile_path=profile,
-                               outputs_root=_data_dir() / "ats_outputs", style="both",
+                               outputs_root=outputs_dir(), style="both",
                                cover=True, compile_pdf=False, backend=DEFAULT_BACKEND,
-                               model=args.model,
+                               model=args.model, writers=args.writer,
                                log=lambda m: log(f"[ATS] {m}"))
             log(f"[ATS] Done: {out}")
             return 0

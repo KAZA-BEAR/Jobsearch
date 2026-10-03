@@ -123,10 +123,13 @@ CANDIDATE FACTS (the only things you may state about the candidate):
 
 Output only the cover letter body."""
 
+# "exact title ... never translated": Qwen3-4B translated the BMW title's
+# "Flussregelung" (flux control) as "river regulation".
 RECRUITER_ONLY = """Write a short message in {language} from the candidate to a recruiter
 about the job below, as JSON with three fields, each ONE sentence:
 - "intro": in the first person ("I am ..."), who the candidate is and which role
-  they are writing about,
+  they are writing about - name the role with its exact title from the job, copied
+  as written and never translated,
 - "evidence": one concrete thing from the profile that fits the role (if the job
   lists numbered requirements with proof lines, use the proof of requirement 1),
 - "question": a low-pressure question the candidate asks about the role, team or

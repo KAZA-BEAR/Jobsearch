@@ -145,6 +145,31 @@ def _api_mcf():
     return PASS, f"answered via {p.working[1] if p.working else '?'}, {len(jobs)} jobs"
 
 
+def _api_discovery(what: str):
+    """One of the open-ended discovery sources: answers, and in the expected shape."""
+    def check():
+        import requests
+        from discover_jobs import UA, WIKI_UA
+        s = requests.Session()
+        s.headers["User-Agent"] = UA
+        if what == "crawl":
+            info = s.get("https://index.commoncrawl.org/collinfo.json", timeout=60).json()
+            return PASS, f"newest index {info[0]['id']}"
+        if what == "wikidata":
+            r = s.get("https://query.wikidata.org/sparql", headers={"User-Agent": WIKI_UA},
+                      params={"query": "SELECT ?x WHERE { wd:Q183 wdt:P36 ?x }", "format": "json"},
+                      timeout=60)
+            r.raise_for_status()
+            return PASS, "SPARQL endpoint answered"
+        if what == "yc":
+            n = len(s.get("https://yc-oss.github.io/api/companies/all.json", timeout=90).json())
+            return PASS, f"{n} companies in the directory"
+        hits = s.get("https://hn.algolia.com/api/v1/search_by_date",
+                     params={"tags": "story,author_whoishiring", "hitsPerPage": 3}, timeout=30).json()["hits"]
+        return PASS, hits[0]["title"] if hits else "no thread yet"
+    return check
+
+
 def _api_usajobs():
     _need("USAJOBS_API_KEY", "USAJOBS_EMAIL")
     from us_asia_jobs import USAJobsProvider
@@ -196,6 +221,12 @@ def api_checks(sec_email: str = "") -> list[tuple[str, callable]]:
         ("Workday", _api_workday),
     ]
     checks += [(f"Research: {label}", _api_research(code)) for code, label in RESEARCH.items()]
+    checks += [
+        ("Discovery: Common Crawl board index", _api_discovery("crawl")),
+        ("Discovery: Wikidata", _api_discovery("wikidata")),
+        ("Discovery: Y Combinator directory", _api_discovery("yc")),
+        ("Discovery: Hacker News 'Who is hiring?'", _api_discovery("hn")),
+    ]
     # one employer per job-board platform
     seen = set()
     for b in BOARDS + US_ASIA_BOARDS:
@@ -222,9 +253,9 @@ def api_checks(sec_email: str = "") -> list[tuple[str, callable]]:
 def required_models() -> list[str]:
     """Chat models the CV generator loads, then the embedding model."""
     from ats_embed import EMBED_MODEL
-    from ats_pipeline import DEFAULT_LOCAL_MODELS
-    chat = [m.strip() for m in DEFAULT_LOCAL_MODELS.split(",") if m.strip()]
-    return chat + [EMBED_MODEL]
+    from ats_pipeline import DEFAULT_LOCAL_MODELS, DEFAULT_WRITER
+    chat = [m.strip() for m in f"{DEFAULT_LOCAL_MODELS},{DEFAULT_WRITER}".split(",") if m.strip()]
+    return list(dict.fromkeys(chat)) + [EMBED_MODEL]
 
 
 def downloaded_models() -> dict[str, dict] | None:

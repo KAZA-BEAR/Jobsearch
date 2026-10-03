@@ -28,7 +28,7 @@ import re
 import ats_checks as checks
 import ats_embed as embedding
 import ats_prompts as prompts
-from fit_score import FitScorer
+from fit_score import CEFR_ORDER, LEVEL_WORDS, FitScorer
 
 _DATE = re.compile(r"^((Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.? )?\d{4}$|^present$",
                    re.IGNORECASE)
@@ -134,7 +134,11 @@ def _sentence_of(quote: str, hay: str) -> str:
         return ""
     start = max(hay.rfind(c, 0, i) for c in ".*•;") + 1
     ends = [e for e in (hay.find(c, i + len(first)) for c in ".*•;") if e >= 0]
-    return hay[start:min(ends) if ends else len(hay)]
+    end = min(ends) if ends else len(hay)
+    # At most 80 characters either side: Fraunhofer's list has no full stops, so the
+    # "sentence" was the whole list, its first item "Hochschulstudium (Master ...)"
+    # made every skill look like a field of study, and all 11 were dropped (2026-10-03).
+    return hay[max(start, i - 80):min(end, i + len(first) + 80)]
 
 
 # "You are studying mechanical engineering, mechatronics or computer science":
@@ -209,6 +213,42 @@ def evidence_units(profile: dict) -> list:
     return units
 
 
+# A language requirement is judged from the profile's languages, not by words:
+# "German" and "English" are stop words, so "German language" came down to
+# "language" and was "proven" by the Programming Languages line.
+_LANGUAGES = {"german": "german", "deutsch": "german", "english": "english",
+              "englisch": "english", "french": "french", "dutch": "dutch", "spanish": "spanish",
+              "italian": "italian", "polish": "polish", "swedish": "swedish", "danish": "danish",
+              "norwegian": "norwegian", "finnish": "finnish", "czech": "czech",
+              "portuguese": "portuguese", "chinese": "chinese", "mandarin": "chinese",
+              "japanese": "japanese", "korean": "korean", "urdu": "urdu", "hindi": "hindi",
+              "arabic": "arabic", "russian": "russian", "turkish": "turkish"}
+_LANGUAGE_SKILL = re.compile(r"^\s*(?:(?:fluent|good|very good|excellent|business)\s+)?(" +
+                             "|".join(_LANGUAGES) + r")(?:\s+(?:language|proficiency|skills|"
+                             r"fluency|knowledge|communication))?\s*(?:\(.*\))?\s*$", re.I)
+
+
+def _language_status(skill: str, profile: dict, job_description: str):
+    """(status, evidence) for "German language", "English", ...; None for other skills.
+    German needs the level the ad asks for (B2 if it names none), others B2."""
+    m = _LANGUAGE_SKILL.match(skill)
+    if not m:
+        return None
+    lang = _LANGUAGES[m.group(1).lower()]
+    need = 4
+    if lang == "german":
+        need = checks.german_requirement(job_description)[0] or 4
+    for entry in profile.get("languages") or []:
+        if _LANGUAGES.get(str(entry.get("language", "")).lower().strip()) == lang:
+            level_text = str(entry.get("level", "")).strip()
+            lvl = level_text.lower()
+            have = CEFR_ORDER.get(lvl) or next(
+                (n for w, n in sorted(LEVEL_WORDS.items(), key=lambda x: -len(x[0])) if w in lvl), 1)
+            proof = f"Languages: {entry.get('language')} ({level_text or 'level not stated'})"
+            return ("have" if have >= need else "gap"), proof
+    return "gap", ""
+
+
 def _stems(text: str) -> set:
     return {w.lower()[:5] for w in checks._WORD.findall(text)
             if w.lower() not in checks._STOP and w.lower() not in checks._HR_WORDS and len(w) >= 4}
@@ -232,6 +272,12 @@ def analyse_gaps(profile: dict, requirements: list, call, log,
     units = evidence_units(profile)
     out, unresolved = [], []
     for r in requirements:
+        lang = _language_status(r["skill"], profile, job_description)
+        if lang:
+            status, proof = lang
+            out.append(dict(r, terms=[], evidence=[proof] if proof else [], status=status,
+                            source="languages"))
+            continue
         # Match the skill NAME only. Matching the ad's quote too marked "LiDAR sensing"
         # as proven because its quote ("Experience with ROS, LiDAR, or simulation")
         # also names ROS, which the profile has.
@@ -288,6 +334,8 @@ def analyse_gaps(profile: dict, requirements: list, call, log,
         else:
             proven = 0
             for req, (status, line) in zip(open_reqs, verdicts):
+                if status == "have" and not _backs(req["skill"], line):
+                    status = "likely"      # shown for you to judge, never used in the CV
                 if status != "gap":
                     req.update(status=status, source="meaning", evidence=[line])
                     proven += status == "have"
@@ -338,7 +386,7 @@ def _match_by_meaning(reqs: list, profile: dict, call, embed_url: str) -> list:
         found = {}
     terms = [found.get(i, []) for i in range(1, len(reqs) + 1)]
     out = []
-    for req, top in zip(reqs, embedding.rank(reqs, profile, embed_url, terms=terms)):
+    for req, top, extra in zip(reqs, embedding.rank(reqs, profile, embed_url, terms=terms), terms):
         try:
             raw = call(prompts.verify_prompt(req, [item for _s, _l, item in top]),
                        max_tokens=300, schema=prompts.VERIFY_SCHEMA, temperature=0)
@@ -352,8 +400,22 @@ def _match_by_meaning(reqs: list, profile: dict, call, embed_url: str) -> list:
                 break
             if said.get(i) == "partly" and best[0] == "gap":
                 best = ("likely", line)
+        if best[0] != "gap" and not _shares(f"{req['skill']} {' '.join(extra)}", best[1]):
+            best = ("gap", "")
         out.append(best)
     return out
+
+
+def _shares(words_text: str, line: str) -> bool:
+    """The line names at least one specific word of the requirement or of the terms
+    the model expanded it into ("serial buses" -> UART, I2C, SPI). The model linked
+    "Microsoft Office" to "Developed software for avionics" and "electric drive
+    control" to a path-planning bullet (BMW ad), sharing no word at all."""
+    words = {w for w in checks._WORD.findall(words_text)
+             if w.lower() not in checks._STOP and w.lower() not in _GENERIC}
+    words |= set(re.findall(r"\b[A-Z0-9]{2,}\b", words_text))       # UART, I2C, CAN
+    return any(re.search(rf"(?<![a-z0-9]){re.escape(w.lower()[:max(5, len(w) - 2)])}", line.lower())
+               for w in words)
 
 
 def _mark_alternatives(reqs: list, job_description: str) -> None:
@@ -389,7 +451,21 @@ _GENERIC = set("""global local general analysis analyse analyze testing support 
 knowledge programming systems system design research methods method technical technology
 technologies management maintenance strategies strategy efficiency scalability performance
 assessment environment environments application applications data field
-real world time multiple sensor sensors""".split())
+real world time multiple sensor sensors engineering engineer""".split())
+
+
+def _backs(skill: str, line: str) -> bool:
+    """The profile line names more than half of the skill's specific words. Used on
+    a model's "yes" from meaning-based matching: Qwen3-4B said yes to "motor machine
+    design" for a 4-DOF manipulator bullet and to "test procedures" for "added one
+    test case" (BMW ad, 2026-09-30), and both were reported as proven."""
+    words = [w for w in checks._WORD.findall(skill)
+             if w.lower() not in checks._STOP and w.lower() not in _GENERIC]
+    if not words:
+        return True
+    hits = sum(bool(re.search(rf"\b{re.escape(w.lower()[:max(5, len(w) - 2)])}", line, re.I))
+               for w in words)
+    return hits * 2 > len(words)
 
 
 def gap_terms(requirements: list, profile: dict) -> set:

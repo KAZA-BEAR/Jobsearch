@@ -54,7 +54,9 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "ansys": ("ansys",),
     "xml": ("xml",),
     "cad": ("cad", "konstruktion"),
-    "simulation": ("simulation", "simulink"),
+    # Not "simulink": a simulation bullet is no proof of MATLAB Simulink, and the
+    # alias reported "Matlab Simulink" as partly met for the BMW PhD ad.
+    "simulation": ("simulation",),
     "uart": ("uart",),
     "i2c": ("i2c",),
     "spi": ("spi",),

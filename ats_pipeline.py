@@ -151,11 +151,19 @@ def list_local_models(base_url: str = None, timeout: int = 15):
 
 # The default pair: Qwen3-4B judges and drafts, Llama 3.2 3B drafts too (see the
 # 2026-09-30 pilot: ~75 s a run on a 6 GB RTX 3050). Override with ATS_MODELS.
-DEFAULT_LOCAL_MODELS = os.environ.get("ATS_MODELS", "qwen/qwen3-4b-2507,llama-3.2-3b-instruct")
+# The judge (first model listed). Before the separate letter writer (DEFAULT_WRITER)
+# this was the pair "qwen/qwen3-4b-2507,llama-3.2-3b-instruct", both drafting letters.
+DEFAULT_LOCAL_MODELS = os.environ.get("ATS_MODELS", "qwen/qwen3-4b-2507")
 # Context each model is loaded with. Loaded on demand, LM Studio gave Llama its
 # maximum (131072), whose working memory filled the GPU so Qwen could not load.
 # (LM Studio rounds a requested 6000 up to 6144.)
-MODEL_CONTEXT = {"qwen/qwen3-4b-2507": 6144, "llama-3.2-3b-instruct": 6144}
+MODEL_CONTEXT = {"qwen/qwen3-4b-2507": 6144, "llama-3.2-3b-instruct": 6144,
+                 "prism-ml/bonsai-27b": 6144}
+# Who writes the cover letter and recruiter message, separate from the judge (the
+# first model above), which keeps requirements, the fact-check and the CV edits. The
+# 3-4B judges invented 5-17 letter sentences per job for the fact-check to delete
+# (2026-10-03), so a larger model writes. Comma-separate several to draft in parallel.
+DEFAULT_WRITER = os.environ.get("ATS_WRITER", "prism-ml/bonsai-27b")
 DEFAULT_CONTEXT = 6144
 
 
@@ -445,7 +453,11 @@ _FINE_REASON = re.compile(r"(does not state|general enthusiasm|desire to learn|i
                           # "This is supported by facts." (no "the") deleted 3 true sentences
                           r"(in|by) (the )?facts|consistent with (the )?facts|matches (the )?facts|"
                           # "Repeats application fact, not new information" (a true sentence)
-                          r"not new information|repeats (an? |the )?(application|stated|known) fact)",
+                          r"not new information|repeats (an? |the )?(application|stated|known) fact|"
+                          # qwen3-4b judge, 2026-10-03: "Stated in facts" (true UART sentence),
+                          # "Repeats a fact, not new" (true C++ and ROS2 sentences)
+                          r"^\s*(stated|listed|supported|present|found) (in|by) (the )?facts\W*$|"
+                          r"repeats (an? |the )?fact\b)",
                           re.I)
 
 
@@ -519,7 +531,11 @@ def _near_copy(sentence: str, profile: dict, fact_lines: list, forbidden=()) -> 
     every Bonsai letter fell back to the plain one built from the profile; code
     overrules it here. One line per clause: allowing two let "C++/Python code for
     robot navigation" pass on the SOCO line plus the robot-platform line."""
-    if len(checks._content_stems(sentence)) < 5 or _code_checks(sentence, profile,
+    # Four content words are enough when every one comes from the profile: "I added one
+    # new feature and test case to the computation engine" was deleted by the judge
+    # ("not in the facts") although it is the SOCO bullet nearly word for word.
+    short = len(checks._content_stems(sentence)) < 5
+    if len(checks._content_stems(sentence)) < 4 or _code_checks(sentence, profile,
                                                                 fact_lines, forbidden):
         return False
     if any(checks._names_interest(r, sentence) for r in _interests_only(profile)) \
@@ -532,8 +548,14 @@ def _near_copy(sentence: str, profile: dict, fact_lines: list, forbidden=()) -> 
             continue
         # A short clause must come wholly from one line: with more split points,
         # "..., while leading the team" would otherwise pass as too short to judge.
-        need = 0.85 if len(stems) >= 3 else 1.0
-        if max((len(stems & l) / len(stems) for l in lines), default=0) < need:
+        need = 0.85 if len(stems) >= 3 and not short else 1.0
+        share, best = max(((len(stems & l) / len(stems), i) for i, l in enumerate(lines)),
+                          default=(0, -1))
+        if share < need:
+            return False
+        # "led", "managed" are verbs, so not counted above: "I led a team to create a
+        # robot platform ..." matched the 'Coordinating with teams ...' bullet 100%.
+        if _LEAD.search(clause) and not _LEAD.search(fact_lines[best]):
             return False
     return True
 
@@ -617,8 +639,14 @@ def factcheck(text: str, facts: str, call, log, profile: dict = None,
     for para in paragraphs:
         for k, s in enumerate(para):
             if s and known_stems and _repeats(s, known_stems):
-                cut(para, k, " ".join(s.split()), "repeats a claim already removed "
-                                                  "from the first draft")
+                flat = " ".join(s.split())
+                # A first-draft deletion can itself be the judge's mistake: a rewrite
+                # that restates the profile ("My work as Student Assistant (SHK)
+                # involved building and testing a 4-DOF manipulator ...") stays.
+                if _near_copy(flat, profile or {}, fact_lines, forbidden):
+                    overruled.add(flat)
+                    continue
+                cut(para, k, flat, "repeats a claim already removed from the first draft")
     for sentence, why in _code_checks(text, profile or {}, fact_lines, forbidden):
         target = re.sub(r"\s+", " ", sentence)
         for para in paragraphs:
@@ -640,13 +668,21 @@ def _evidence_sentence(profile: dict, requirements: list) -> str:
     """One true sentence built from a real past-tense bullet that proves a job
     requirement: 'At SOCO Engineers GmbH, I wrote and debugged C++/Python code ...'."""
     proven = " ".join(e for r in requirements if r["status"] == "have" for e in r["evidence"])
+    # A bullet that proves a requirement; else the most recent past-tense bullet. With
+    # only a language proven (BMW PhD), no bullet qualified and the message went out
+    # with no evidence sentence: "has 2 sentence(s) (needs exactly 3)".
+    fallback = ""
     for e in profile.get("experience") or []:
         for b in e.get("bullets") or []:
             first = b.split()[0].lower() if b.split() else ""
             past = first.endswith("ed") or first in checks._IRREGULAR
+            the = "the " if str(e["employer"]).split()[0].lower() in _PLACE_ARTICLE else ""
+            sentence = f"At {the}{e['employer']}, I {b[0].lower()}{b[1:].rstrip('.')}."
             if past and b in proven:
-                return f"At {e['employer']}, I {b[0].lower()}{b[1:].rstrip('.')}."
-    return ""
+                return sentence
+            if past and not fallback:
+                fallback = sentence
+    return fallback
 
 
 def _intro_sentence(profile: dict, role: str) -> str:
@@ -666,22 +702,35 @@ def _complete_recruiter(text: str, profile: dict, requirements: list, role: str 
     bullet, the question from a plain template. (Bonsai once left only the
     question; always inserting evidence once repeated the manipulator bullet.)"""
     parts = [s for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s.strip()]
+    plain = lambda t: re.sub(r"\s+", " ", re.sub(r"\([^)]*\)", " ", t)).strip().lower()
     if len(parts) == 3 and parts[2].endswith("?") \
             and re.search(r"\b(i|i'm|i am|my)\b", parts[0], re.I) \
-            and re.search(r"\b(i|my)\b", parts[1], re.I):
+            and re.search(r"\b(i|my)\b", parts[1], re.I) \
+            and (not role or plain(role) in plain(parts[0])) \
+            and len(planning._stems(parts[1]) & planning._stems(parts[0])) < \
+            0.6 * max(1, len(planning._stems(parts[1]))):      # evidence, not the intro again
         return text
     question = next((s for s in reversed(parts) if s.endswith("?")),
                     "Could you tell me more about the team's current work?")
     intro = next((s for s in parts if re.match(r"\s*(i am|i'm)\b", s, re.I)),
                  _intro_sentence(profile, role))
+    # The model's intro must name the role as the ad titles it: it wrote "Doctorand/in
+    # elektrischer Antriebe - mit Fokus auf innovative Regelungsverfahren ..." for the
+    # BMW title despite the prompt (2026-10-03). Compared without "(w/m/x)" notes.
+    if role and plain(role) not in plain(intro):
+        intro = _intro_sentence(profile, role)
     # A kept sentence without "I"/"my" ("Developed and tested ...") is a broken
     # sentence: the code-built evidence replaces it.
-    rest = [s for s in parts if s not in (intro, question) and re.search(r"\b(i|my)\b", s, re.I)]
-    evidence = rest[0] if rest else _evidence_sentence(profile, requirements)
-    if not evidence:
-        return " ".join([intro, question])
-    same = planning._stems(evidence) & planning._stems(intro)
-    if len(same) >= 0.6 * max(1, len(planning._stems(evidence))):
+    # Never another intro: when the code's intro replaced the model's (title not exact),
+    # the model's "I am ..." sentence was taken as the evidence, dropped as a repeat of
+    # the intro, and the message went out as intro + question (Fraunhofer, Thales,
+    # 2026-10-03: "has 2 sentence(s) (needs exactly 3)").
+    rest = [s for s in parts if s not in (intro, question) and re.search(r"\b(i|my)\b", s, re.I)
+            and not re.match(r"\s*(i am|i'm)\b", s, re.I)]
+    repeats = lambda e: len(planning._stems(e) & planning._stems(intro)) >= \
+        0.6 * max(1, len(planning._stems(e)))
+    evidence = rest[0] if rest and not repeats(rest[0]) else _evidence_sentence(profile, requirements)
+    if not evidence or repeats(evidence):
         return " ".join([intro, question])
     return " ".join([intro, evidence, question])
 
@@ -773,10 +822,427 @@ _NUMBER_WORDS = {"1": "one", "2": "two", "3": "three", "4": "four", "5": "five",
                  "7": "seven", "8": "eight", "9": "nine"}
 
 
+# What an experience "did" for the candidate, past and present tense.
+_GAVE_ME = (r"(strengthen(?:s|ed)|taught|teaches|prepare[sd]|give[sn]|gave|provide[sd]|"
+            r"equip(?:s|ped)|help(?:s|ed)|enable[sd]|allow(?:s|ed)|hone[sd]|sharpen(?:s|ed)|"
+            r"deepen(?:s|ed)|improve[sd]|shape[sd]|la(?:id|ys)|instill(?:s|ed)|reinforce[sd]|"
+            r"solidifie[sd]|broaden(?:s|ed)|enhance[sd]|foster(?:s|ed)|cultivate[sd]|"
+            r"ground(?:s|ed)|demonstrates|showcases|shows|shown|showed|proves|proven|proved|"
+            r"supports|underpins|"
+            # plural subjects: "These projects demonstrate my ability ..." (BMW, 2026-10-03)
+            r"demonstrate|showcase|show|prove|highlight|highlights|reflect|reflects|"
+            r"illustrate|illustrates|underline|underlines|"
+            r"built|builds|developed|develops)\b")
+# Sentences that fill space without saying anything about the candidate. From the
+# DLR letter: "I'm familiar with XML documentation ..., which could be useful for
+# this role", "I am keen to learn about transferable skills such as ...".
+_PADDING = re.compile(
+    r"\b(which (could|would|might|may) be (useful|helpful|valuable|beneficial)|"
+    r"transferable skills|in addition to the above|as mentioned (above|before|earlier))\b"
+    # Inference about past work, which no profile line states and the fact-check,
+    # reading first-person claims, let through: "These tasks required understanding
+    # of real-time processing and system reliability." (DLR letter)
+    r"|^(these|this|those|such|both)\s+(tasks?|experiences?|projects?|roles?|work|positions?)\s+"
+    r"(required|involved|demanded|needed|called for|relied on)\b"
+    # Recap of a sentence already written: "My experience as an Artificial Intelligence
+    # Engineer at SOCO Engineers GmbH has given me hands-on experience with C++ and Python"
+    r"|^my (experience|role|time|work|position)s?\s+(as|at|in)\b.*\b(has|have)\s+"
+    r"(given|provided|taught|equipped|allowed)\b"
+    # What a past role, project or study did FOR the candidate is the model's
+    # conclusion, never a profile fact: "These experiences strengthened my ability to
+    # implement control algorithms" (BMW), "my studies ... have provided a solid
+    # foundation for designing real-time systems", "This experience taught me the
+    # importance of effective communication" (DLR, 2026-09-30).
+    r"|\b(this|these|that|those|such|both|my|the|each|all)\s+(?:[\w'’-]+\s+){0,6}?"
+    r"(experiences?|work|roles?|projects?|tasks?|studies|coursework|courses|background|"
+    r"education|degree|programs?|programmes?|time|positions?|internships?|jobs?|"
+    # "My research interests in SLAM ... have equipped me with the skills" (BMW)
+    r"interests?|skills?|knowledge|expertise)\b"
+    # Up to 160 characters between the noun and the verb, and present tense too: "My
+    # coursework in Autonomous Systems, AR/VR Human Machine Interface, Additive
+    # Manufacturing ... has given me" (DLR) and "My background in control systems ...
+    # provides a foundation" (BMW) both got past a 60-character, past-tense rule.
+    # ... but not across an "I": in "In my role as a student assistant ..., I built"
+    # the one who built is the candidate, which is a claim the fact-check reads.
+    r"(?:(?!\bI\b)[^.!?]){0,160}?\b(?:has\s+|have\s+|had\s+)?(?:also\s+|further\s+)?" + _GAVE_ME
+    # A trailing clause doing the same: "... coursework in Control Systems, which
+    # provided a foundation in the regulation of electric drives" (BMW recruiter)
+    + r"|,\s*(which|that|and this|this)\s+(?:has\s+|have\s+|also\s+)*" + _GAVE_ME
+    + r"\s+(me|my|a|an|the|strong|solid)\b"
+    # "I am confident in my ability to work with C++ programming, as evident from my
+    # experience ..." (DLR, 2026-10-03)
+    r"|\bi am confident (in|that) my\b|\bas (is )?evident(ced)? (from|by|in) my\b"
+    # Future tense: "I believe that this knowledge will enable me to make a significant
+    # contribution" (DLR, 2026-10-03)
+    r"|\b(this|that|these|those|such|my|the)\s+(?:[\w'’-]+\s+){0,3}?(knowledge|skills?|skill set|"
+    # "this role will enable me to contribute ..." (BMW, 2026-10-03)
+    r"expertise|understanding|experience|background|training|learning|role|position|"
+    r"opportunity|program|programme|work)\s+(will|would|should|"
+    r"can|could|may|might)\s+(?:also\s+)?(enable|help|allow|prepare|equip|make|let)\b"
+    # "My studies ... have focused on control systems, which align with the core
+    # technical challenges of electric drive development" (BMW, 2026-10-03)
+    r"|,\s*(?:which|that|and this|this)\s+(?:also\s+|directly\s+|closely\s+)?(align|aligns|match|"
+    r"matches|fit|fits|relate|relates|connect|connects|correspond|corresponds)\s+"
+    r"(?:well\s+|closely\s+|directly\s+|perfectly\s+)?(with|to)\b"
+    # High-fit letters (2026-10-03): "..., which provides foundational knowledge in image
+    # processing", "..., which demonstrates direct experience with C++", "..., which are
+    # essential tools in the field", "my experience ... aligns well with this role".
+    r"|,\s*(?:which|that|and this|this)\s+(?:also\s+|directly\s+)?(provides?|demonstrates?|"
+    r"shows?|proves?|enables?|allows?|supports?|equips?|gives?|reflects?|highlights?|"
+    r"underlines?)\b"
+    r"|,\s*which\s+are\s+(essential|important|key|relevant|crucial|vital|valuable)\b"
+    r"|\b(aligns?|fits?)\s+(?:very\s+)?(?:well|perfectly|closely|directly|nicely)?\s*with\s+"
+    r"(this|the)\s+(role|position|job|requirements)\b"
+    # "My experience writing C++ code aligns with the requirement for C++ programming
+    # knowledge" (Fraunhofer, 2026-10-03): kept once the profile overrule stopped the
+    # judge deleting true sentences, so the matching talk is code's to drop.
+    r"|\b(aligns?|fits?|matches|meets|fulfil?ls?|satisf(?:y|ies))\s+(?:also\s+)?(?:with\s+)?"
+    r"(?:the|this|your|its|their)\s+(?:\w+\s+)?(requirements?|criteri(?:on|a))\b"
+    # "... position at BMW AG, as it aligns with my studies in ..." (BMW, 2026-10-03)
+    r"|,\s*(?:as|since|because)\s+(?:it|this|the role|the position)\s+(?:closely\s+|directly\s+)?"
+    r"(aligns|fits|matches|relates|corresponds|connects)\b"
+    # "..., which will enable me to work effectively in this position" (BMW, 2026-10-03)
+    r"|,\s*which\s+(?:will|would|could|can|should)\s+(?:also\s+)?(enable|help|allow|prepare|"
+    r"equip|let)\s+me\b"
+    # "..., which I believe would be an excellent addition to my skill set" (BMW)
+    r"|,\s*which\s+(?:i\s+believe\s+)?(?:would|will|could|can)\s+be\s+(?:an?\s+)?"
+    r"(excellent|great|valuable|useful|good|important|welcome)\s+(addition|asset)\b"
+    # "This background supports my ability to work on robotics hardware platforms"
+    r"|\b(supports?|underpins?)\s+my\s+(ability|capacity|readiness|suitability)\b"
+    # "... make me an ideal candidate for this position" (BMW, 2026-10-03)
+    r"|\bmakes?\s+me\s+(an?\s+)?(ideal|strong|perfect|excellent|great|good|suitable|"
+    r"well-suited|right)\s+(candidate|fit|match)\b", re.I)
+# Saying which role again, mid-letter: "I am applying for the doctoral position in
+# direct flux control ..." after an opening that named the German title (BMW).
+_APPLYING = re.compile(r"\b(i am|i'm)\s+applying\b|\bplease consider my application\b|"
+                       r"\b(to|i)\s+apply\s+(for|to)\b|\bas i apply\b", re.I)
+# A sentence about the work rather than by the candidate ("The change was consistent
+# across all cycles and did not require rework.", "This work was part of a larger
+# system update." - DLR, 2026-10-03). The fact-check reads "I ..." claims, so these
+# passed; they stay only when a profile line backs most of their words.
+_THIRD_PERSON = re.compile(r"^(this|that|the|these|those|it|they|such)\b", re.I)
+# A closing summary says nothing new: "In summary, I am excited about the opportunity
+# to join BMW AG and contribute my skills ..." (BMW, 2026-10-03)
+_SUMMARY = re.compile(r"^(in summary|in conclusion|overall|to sum up|to summari[sz]e|"
+                      r"ultimately|in short|all in all|in closing)\b", re.I)
+# Leadership the profile may not show: "co-led a team to develop a robot platform"
+# for "Coordinating with teams across different domains" (DLR, 2026-10-03).
+_LEAD = re.compile(r"\b(co-led|co-lead|led|lead|leading|managed|managing|headed|spearheaded|"
+                   r"directed|supervised|oversaw|orchestrated)\b", re.I)
+
+
+def _honest_lead(sentence: str, profile: dict) -> str | None:
+    """The sentence when the profile line it describes shows leadership too; with
+    "worked with" when it does not and the object is a team; else None."""
+    if not _LEAD.search(sentence):
+        return sentence
+    # Any related profile line that shows leadership too: the best word match for "I
+    # managed teams for future competitions" was a different competition bullet.
+    # It must be the line the sentence is about, though: matching at least as well as
+    # any other line, or "co-led a team ... robot platform" passed on the one word
+    # "robot" it shares with the competition bullet.
+    stems = checks._content_stems(sentence)
+    scores = [(len(stems & checks._content_stems(f"{label} {text}")), bool(_LEAD.search(text)))
+              for label, text in planning.evidence_units(profile)]
+    best_other = max((n for n, lead in scores if not lead), default=0)
+    if any(lead and n >= max(2, best_other) for n, lead in scores):
+        return sentence                      # "managed teams for future competitions"
+    fixed = re.sub(r"\b(co-led|co-lead|led|managed|headed|spearheaded|directed|supervised|"
+                   r"oversaw|orchestrated)\s+(?=(a|the|cross-domain|multidisciplinary|"
+                   r"interdisciplinary)?\s*(team|teams)\b)", "worked with ", sentence, flags=re.I)
+    return None if _LEAD.search(fixed) else fixed
+
+
+def _backed_by_profile(sentence: str, profile: dict) -> bool:
+    stems = checks._content_stems(sentence)
+    if len(stems) < 3:
+        return True                     # too short to judge ("This took a month.")
+    lines = [f"{label} {line}" for label, line in planning.evidence_units(profile)]
+    best = max((len(stems & checks._content_stems(l)) for l in lines), default=0)
+    return best >= 0.5 * len(stems)
+# Office software is no gap worth a sentence: "I am keen to learn Microsoft Office."
+_TRIVIAL_GAP = re.compile(r"\b(microsoft office|ms office|excel|powerpoint|outlook|"
+                          r"word processing)\b", re.I)
+# Soft skills the models add ("gained experience in collaboration, communication,
+# and project management"): kept only when the profile itself names them.
+_SOFT_SKILL = re.compile(r"\b(project management|leadership|stakeholder management|"
+                         r"time management|people management|communication skills?|"
+                         # "I possess strong analytical and problem-solving abilities" (ZEISS)
+                         r"analytical)\b", re.I)
+# Talk about spoken languages. The models turned "German: Beginner" into "I am keen
+# to learn German language, but I have already demonstrated proficiency in English"
+# (BMW letter); the profile's own plain sentence replaces it.
+_LANGUAGE_TALK = re.compile(
+    r"\b(german|english|deutsch|englisch|french|spanish|urdu|mother tongue|native speaker)\b"
+    # "As a strong background holder of both German and English languages, I am
+    # confident in effectively communicating ..." (BMW, 2026-10-03: German is beginner)
+    r"[^.]*\b(learn\w*|proficien\w*|fluen\w*|demonstrat\w*|level|speak\w*|skills?|languages?|"
+    r"communicat\w*|command|holder|confident|background|knowledge|master\w*)\b"
+    r"|\b(learn\w*|proficien\w*|fluen\w*|speak\w*)\b[^.]*\b(german|english|deutsch|englisch)\b",
+    re.I)
+
+
+# An outcome clause: ", which improved team understanding of data flow" was added to
+# the XML documentation bullet (DLR, 2026-10-03); ", which reduced test downtime by
+# three minutes per cycle" is the profile's own result and stays.
+_OUTCOME = re.compile(r",\s*(?:which|that|and this|this)\s+(?:also\s+|further\s+|greatly\s+|"
+                      r"significantly\s+)?[a-z]+ed\b", re.I)
+
+
+def _cut_unbacked_outcome(sentence: str, profile: dict) -> str:
+    m = _OUTCOME.search(sentence)
+    if not m:
+        return sentence
+    # Judged even when short: "which improved team understanding of data flow" has
+    # just two content words, and the general rule leaves under three alone.
+    stems = checks._content_stems(sentence[m.start() + 1:])
+    lines = [f"{label} {line}" for label, line in planning.evidence_units(profile)]
+    best = max((len(stems & checks._content_stems(l)) for l in lines), default=0)
+    if not stems or best >= max(1, 0.5 * len(stems)):
+        return sentence
+    head = sentence[:m.start()].rstrip(" ,")
+    return head + "." if len(head.split()) >= 5 else sentence
+
+
+def _strip_inference(sentence: str) -> str | None:
+    """The sentence without its padding or inference, or None to drop it. A trailing
+    clause is cut and the true first half kept: "I completed a Bachelor's degree in
+    Electrical Engineering with coursework in Control Systems, which provided a
+    foundation in the regulation of electric drives." -> "... in Control Systems."
+    (BMW recruiter message, 2026-10-03)."""
+    m = _PADDING.search(sentence)
+    if not m:
+        return sentence
+    cut = max(sentence.rfind(", ", 0, m.start()), sentence.rfind("; ", 0, m.start()),
+              sentence.rfind(" - ", 0, m.start()),
+              m.start() if sentence[m.start()] == "," else -1)     # ", which provided ..."
+    head = sentence[:cut].rstrip(" ,;-") if cut > 0 else ""
+    # Cut only at a side clause ("..., which ...", "..., as it ..."). At the main verb,
+    # "My work as a Student Assistant at the Robotics Lab, Technische Hochschule
+    # Deggendorf, has given me ..." left a verbless fragment (ZEISS, 2026-10-03).
+    tail = sentence[cut:].lstrip(" ,;-") if cut > 0 else ""
+    if not re.match(r"(which|that|and this|this|as|since|because|so)\b", tail, re.I):
+        return None
+    # A leading "As I apply for ..., my studies have provided ..." leaves "As I apply
+    # for the ... position at BMW AG." - a fragment, not a sentence (2026-10-03).
+    if re.match(r"(as|while|since|because|when|although|though|if|whereas|after|before|"
+                r"given that|now that)\b", head, re.I):
+        return None
+    if len(head.split()) >= 6 and not _PADDING.search(head):
+        return head + "."
+    return None
+
+
+# "Here, I successfully automated workflows in ANSYS" after a Robotics Lab sentence
+# put SOCO's work at the lab; "There, I coordinated ..." after a SOCO sentence put
+# the lab's work at SOCO (BMW letters, 2026-10-03).
+_DEICTIC = re.compile(r"^(?:here|there|in (?:this|that|the same) (?:role|position|job|lab|company|"
+                      r"team)|in (?:these|those|both) (?:roles|positions|jobs)|"
+                      r"at the same (?:place|company|lab))\s*,?\s*", re.I)
+_PLACE_ARTICLE = ("robotics", "research", "institute", "lab", "laboratory", "university",
+                  "department", "chair", "centre", "center")
+
+
+def _learns_what_profile_has(sentence: str, profile: dict) -> bool:
+    """'I am keen to learn more about working in a team to create XML documentation
+    for different variables' - what follows "learn" is mostly a profile line
+    (DLR, 2026-10-03); checks.learning_known reads only the first words after it."""
+    m = re.search(r"\b(?:keen|eager|excited|want|hope|looking forward|interested)\s+(?:to\s+)?"
+                  r"learn\w*\s+(.+)", sentence, re.I)
+    if not m:
+        return False
+    stems = checks._content_stems(m.group(1))
+    if len(stems) < 2:
+        return False
+    best = max((len(stems & checks._content_stems(line))
+                for _label, line in planning.evidence_units(profile)), default=0)
+    return best >= max(2, 0.5 * len(stems))
+
+
+def _names_place(text: str, profile: dict) -> bool:
+    """The text names an employer or project itself ("at SOCO Engineers GmbH")."""
+    low = text.lower()
+    names = [str(e.get("employer", "")).split(",")[0] for e in profile.get("experience") or []]
+    names += [str(p.get("name", "")) for p in profile.get("projects") or []]
+    return any(n and n.lower() in low for n in names)
+
+
+def _place_of(text: str, profile: dict, strict: bool = False) -> str:
+    """Where the work in `text` happened, as a phrase ("At SOCO Engineers GmbH", "In
+    the XR Simulation of Factory project"), or "" if unclear: an employer named in
+    the text, else the experience or project line sharing the most words with it."""
+    def phrase(label: str) -> str:
+        if " @ " in label:
+            employer = label.split(" @ ", 1)[1]
+            the = "the " if employer.split()[0].lower() in _PLACE_ARTICLE else ""
+            return f"At {the}{employer}"
+        if label.startswith("Project: "):
+            return f"In the {label[len('Project: '):]} project"
+        return ""
+    low = text.lower()
+    for e in profile.get("experience") or []:
+        name = str(e.get("employer", "")).split(",")[0].strip().lower()
+        if name and name in low:
+            return phrase(f"{e['title']} @ {e['employer']}")
+    stems = checks._content_stems(text)
+    # strict: adding a place nobody wrote needs a clear match (3+ shared words)
+    best, label = (2 if strict else 1), ""
+    for lab, line in planning.evidence_units(profile):
+        if " @ " not in lab and not lab.startswith("Project: "):
+            continue
+        n = len(stems & checks._content_stems(line))
+        if n > best:
+            best, label = n, lab
+    return phrase(label) if label else ""
+
+
+def _fix_place(sentence: str, previous: str, profile: dict) -> str:
+    """Replace "Here," / "There," / "In this role," with the real employer or project
+    when the sentence's work is not where the previous sentence was."""
+    m = _DEICTIC.match(sentence)
+    if not m:
+        # "I also automated ANSYS simulation workflows" right after two Robotics Lab
+        # sentences read as lab work; it was SOCO's (DLR, 2026-10-03). Only when the
+        # sentence names no place, matches one profile line clearly, and the previous
+        # sentence names a different place.
+        also = re.match(r"(I (?:also|additionally|further|then)\b)", sentence)
+        if not also or not previous or _names_place(sentence, profile):
+            return sentence
+        here, before = _place_of(sentence, profile, strict=True), _place_of(previous, profile)
+        if here and before and here != before:
+            return f"{here}, {sentence}"
+        return sentence
+    rest = sentence[m.end():]
+    # Also when the previous sentence names no place (or was removed): "In these
+    # roles, I built and tested a 4-DOF manipulator ..." pointed at nothing.
+    here, before = _place_of(rest, profile), _place_of(previous, profile) if previous else ""
+    if not here or here == before:
+        return sentence
+    rest = rest if rest.startswith("I ") else rest[:1].lower() + rest[1:]
+    return f"{here}, {rest}"
+
+
+def _tidy_recruiter(text: str, profile: dict) -> str:
+    """The letter's inference and place rules for the recruiter message, sentence by
+    sentence; _complete_recruiter refills a part this leaves empty."""
+    out, prev = [], ""
+    for s in (x for x in re.split(r"(?<=[.!?])\s+", (text or "").strip()) if x):
+        s = _strip_inference(s) if not s.rstrip().endswith("?") else s
+        if not s:
+            continue
+        s = _fix_place(s, prev, profile)
+        out.append(s)
+        prev = s
+    return " ".join(out)
+
+
+# German pasted from the ad into an English letter: "... the company's expertise in
+# Premium-Finanz- und Mobilitätsdienstleistungen, particularly in innovative
+# Regelungsverfahren für Synchronmotoren" (BMW, 2026-10-03).
+_GERMAN_WORD = re.compile(r"\b(und|für|der|die|das|mit|von|im|zur|zum|bei|oder|sowie)\b|"
+                          r"\b\w*[äöüß]\w*\b", re.I)
+
+
+# Spelled the same in German and English ads, so not a sign of copied German.
+_SHARED_WORDS = set("""position positions innovative interesse projekte projects
+mentoring onboarding software hardware simulation prototyping company research
+""".split())
+
+
+def _copies_german(sentence: str, allowed: set) -> bool:
+    """German words in the sentence that are not part of the job title or the
+    profile (an institution such as "Technische Hochschule" is fine)."""
+    return any(m.group(0).lower() not in allowed for m in _GERMAN_WORD.finditer(sentence))
+
+
+def _tidy_letter(text: str, profile: dict, role: str = "", ad: str = "",
+                 skills: tuple = ()) -> str:
+    """Code-only, after every model step: drop padding and sentences that repeat an
+    earlier one (the DLR letter told the robot-platform story twice), give spoken
+    languages the profile's plain wording once, and write "at" for "@" in prose.
+    Only removes or swaps in profile wording, so it adds no claim. Keeps the text as
+    it was when fewer than three sentences would remain."""
+    langs = _languages_sentences(profile.get("languages") or [])
+    blob = checks._profile_blob(profile)
+    english = checks.text_language(text or "") == "en"
+    allowed = {w.lower() for w in re.findall(r"\w+", f"{role} {blob} {' '.join(skills)}")}
+    # Words of a German ad that an English letter may not borrow: "Regelungsverfahren",
+    # "Steuerungskonzepte", "Antriebstechnologie" (BMW, 2026-10-03) carry no umlaut.
+    # Tool names stay usable: they are in the requirement names ("Matlab Simulink").
+    summary = re.sub(r"\s+", " ", str(profile.get("profile_summary", ""))).lower()
+    known_learn = {sent for sent, _why in checks.learning_known(text or "", profile)}
+    # The ad body only: the "Position:" header line made "position" count as German.
+    body = checks.jd_excerpt(ad or "", limit=20_000)
+    ad_words = ({w.lower() for w in re.findall(r"[A-Za-zÄÖÜäöüß-]{7,}", body)} - allowed
+                - _SHARED_WORDS if english and ad and checks.text_language(ad) == "de" else set())
+    seen, lang_done, applied, out, kept, prev = [], False, False, [], 0, ""
+    for p_no, para in enumerate(re.split(r"\n\s*\n", (text or "").strip())):
+        sents = []
+        for s in (x for x in re.split(r"(?<=[.!?])\s+", para.strip()) if x):
+            s = _strip_inference(s)
+            if not s or _SUMMARY.match(s):
+                continue
+            s = _honest_lead(s, profile)
+            if not s:
+                continue
+            s = _fix_place(s, prev, profile)
+            if _APPLYING.search(s):
+                # Once, and only in the opening paragraph: the standard opening is
+                # added there afterwards when the letter has none.
+                if applied or p_no > 0:
+                    continue
+                applied = True
+            if _TRIVIAL_GAP.search(s) and re.search(r"\b(learn\w*|keen|eager)\b", s, re.I):
+                continue
+            if _THIRD_PERSON.match(s) and not _backed_by_profile(s, profile):
+                continue
+            # A résumé fragment pasted from the profile summary: "Aspiring Mechatronics
+            # Engineer focused on robotics, AI and autonomous systems with a strong
+            # educational background ..." (BMW, 2026-10-03) - no verb, not a sentence.
+            if summary and not re.search(r"\b(i|my|me)\b", s, re.I) \
+                    and s.lower()[:40].rstrip(" .") in summary:
+                continue
+            # "keen to learn ... XML documentation", which the profile already shows
+            if s in known_learn or _learns_what_profile_has(s, profile):
+                continue
+            if english and (_copies_german(s, allowed) or any(
+                    w.lower() in ad_words for w in re.findall(r"[A-Za-zÄÖÜäöüß-]{7,}", s))):
+                continue
+            s = _cut_unbacked_outcome(s, profile)
+            if any(m.group(0).lower() not in blob for m in _SOFT_SKILL.finditer(s)):
+                continue
+            if _LANGUAGE_TALK.search(s):
+                if not lang_done and langs:
+                    sents += langs
+                    lang_done = True
+                continue
+            stems = checks._content_stems(s)
+            # Mostly said already (70% of its words appear in earlier sentences).
+            # Measured on the new sentence: compared with the shorter one, the whole
+            # coursework sentence went because it shares "electrical engineering"
+            # with "My bachelor's degree is in electrical engineering".
+            said = set().union(*seen) if seen else set()
+            if len(stems) >= 4 and len(stems & said) >= 0.7 * len(stems):
+                continue
+            seen.append(stems)
+            sents.append(re.sub(r"\s@\s", " at ", s))
+            prev = s
+        if sents:
+            out.append(" ".join(sents))
+            kept += len(sents)
+    return "\n\n".join(out) if kept >= 3 else text
+
+
 def _polish_prose(text: str) -> str:
     """Letter prose conventions: small numbers as words ("one new feature"), but
     not in terms like "4-DOF", "2-layer", "15-20%" or "3.5"."""
-    return re.sub(r"(?<![\w.,/-])([1-9])(?=\s+[a-z])", lambda m: _NUMBER_WORDS[m.group(1)], text or "")
+    def word(m):
+        # a version after a name stays a digit: "ROS 2 and" became "ROS two and" (ZEISS)
+        before = re.search(r"(\S+)\s*$", (text or "")[:m.start()])
+        if before and before.group(1)[:1].isupper():
+            return m.group(1)
+        return _NUMBER_WORDS[m.group(1)]
+    return re.sub(r"(?<![\w.,/-])([1-9])(?=\s+[a-z])", word, text or "")
 
 
 def _in_pairs(items: list) -> list:
@@ -792,7 +1258,11 @@ def profile_letter(profile: dict, meta: dict, requirements: list, gap_names: lis
     the profile does not say."""
     p1 = _opening_paragraph(profile, meta)
 
-    have = sorted((r for r in requirements if r["status"] == "have" and r["evidence"]),
+    # Languages are stated in their own sentence below: as a met requirement they
+    # came out as "The role asks for English language. My work as a Languages
+    # included english (Fluent)."
+    have = sorted((r for r in requirements if r["status"] == "have" and r["evidence"]
+                   and r.get("source") != "languages"),
                   key=lambda r: r["priority"] != "required")
     work, used, listed = [], set(), []
     for r in have:
@@ -802,11 +1272,17 @@ def profile_letter(profile: dict, meta: dict, requirements: list, gap_names: lis
             work.append(_work_sentence(line, len(work)))
         elif not line:
             listed.append(r)
-    if not work:          # nothing proven by work: the two most recent bullets
-        for e in (profile.get("experience") or [])[:2]:
-            if e.get("bullets"):
-                work.append(_work_sentence(f"{e['title']} @ {e['employer']}: {e['bullets'][0]}",
-                                           len(work)))
+    # At least three examples: with one proven bullet the DLR letter came out at 133
+    # words, below the 150 the check asks for (2026-10-03). The next ones are the
+    # first bullets of the most recent roles not used yet.
+    for e in profile.get("experience") or []:
+        if len(work) >= 3:
+            break
+        b = (e.get("bullets") or [""])[0]
+        line = f"{e['title']} @ {e['employer']}: {b}"
+        if b and not any(e["employer"] in u for u in used):
+            used.add(line)
+            work.append(_work_sentence(line, len(work)))
     skills = [r["skill"] for r in have]
     # A statement about the job, not a claim: "which my experience covers" also
     # claimed experience for coursework-only requirements. Two items, not a list
@@ -833,7 +1309,8 @@ def profile_letter(profile: dict, meta: dict, requirements: list, gap_names: lis
     # Only extracted requirements: the keyword fallback in gap_names once made this
     # "I am keen to learn similar in practice" (from "or similar simulation tools").
     real_gaps = [g for g in gap_names
-                 if any(r["skill"] == g and r["status"] == "gap" for r in requirements)]
+                 if any(r["skill"] == g and r["status"] == "gap" for r in requirements)
+                 and not _TRIVIAL_GAP.search(g)]
     if real_gaps:
         p3.append(f"I am keen to learn {real_gaps[0]} in practice.")
     p3 += _languages_sentences(profile.get("languages") or [])
@@ -1048,11 +1525,19 @@ def write_texts(profile, job_description, lang, gaps, recruiter, call, log, forb
     deleted). `forbidden` are unmet-requirement terms: mentioning one as a skill
     the candidate has fails the check."""
     _CURRENT_AD["text"] = job_description
+    # Spoken languages are stated by the profile's own sentence, never as proof: as
+    # "requirement 1" the recruiter message said "English as Fluent ... meets the
+    # requirement of 'Sehr gute Deutsch- und Englischkenntnisse'" (German unmet).
+    requirements = [r for r in requirements if r.get("source") != "languages"]
     brief = job_brief(job_description, meta or checks.parse_header(job_description),
                       list(requirements))
     facts = candidate_facts(profile, list(requirements),
                             meta or checks.parse_header(job_description))
     results, issues, removed_all = {}, [], []
+    # One letter writer that is not the judge: it writes, rewrites and restyles; the
+    # judge (`call`) still fact-checks everything it writes.
+    writer = drafters[0] if drafters and len(drafters) == 1 else None
+    write = lambda prompt, **kw: call(prompt, use_model=writer, **kw)
     for field, make, check, schema in (
             ("cover_letter",
              lambda: prompts.cover_only_prompt(profile, brief, lang, gaps, facts),
@@ -1064,7 +1549,7 @@ def write_texts(profile, job_description, lang, gaps, recruiter, call, log, forb
         multi = field == "cover_letter" and drafters and len(drafters) > 1
         for attempt in (() if multi else (1, 2)):
             log(f"Writing the {field.replace('_', ' ')} (attempt {attempt})...")
-            raw = _preclean(call(make(), max_tokens=1200, schema=schema, logprobs=True))
+            raw = _preclean(write(make(), max_tokens=1200, schema=schema, logprobs=True))
             drafts.append(last_logprobs())
             text = prompts.join_recruiter(raw) if schema else raw
             problems = check(text) + checks.gap_claims(text, forbidden)
@@ -1094,7 +1579,7 @@ def write_texts(profile, job_description, lang, gaps, recruiter, call, log, forb
             # exactly which claims not to make, then fact-checked again.
             log(f"Rewriting the {field.replace('_', ' ')} without the removed claims...")
             avoid = "; ".join(r.split(" (")[0] for r in removed)[:900]
-            text = _preclean(call(make() + f"\n\nDo NOT write these unsupported claims: {avoid}",
+            text = _preclean(write(make() + f"\n\nDo NOT write these unsupported claims: {avoid}",
                                   max_tokens=1200, schema=schema, logprobs=True))
             drafts.append(last_logprobs())
             text = prompts.join_recruiter(text) if schema else text
@@ -1137,19 +1622,37 @@ def write_texts(profile, job_description, lang, gaps, recruiter, call, log, forb
                               "personalise it before sending")
         if field == "recruiter_message":
             # also when nothing usable is left: intro, a real bullet and a question
+            best = _tidy_recruiter(best or "", profile)
             best = _complete_recruiter(best or "", profile, list(requirements),
                                        (meta or {}).get("role", ""))
             best = checks.fix_recruiter_question(best)
             best_problems = check(best) + checks.gap_claims(best, forbidden)
         if field == "cover_letter" and best and not built:
             best = _style_pass(best, drafts, facts, call, log, profile, forbidden,
-                               [r.split(" (")[0] for r in removed], check)
+                               [r.split(" (")[0] for r in removed], check, write=write)
             # code-only rewording, undone if any code check objects to the result
             fact_lines = [l.lstrip("- ") for l in facts.splitlines() if l.strip()]
             varied = _vary_openings(best, profile)
             if varied != best and not _code_checks(varied, profile, fact_lines, forbidden):
                 best = varied
+            best = _tidy_letter(best, profile,
+                                (meta or checks.parse_header(job_description)).get("role", ""),
+                                job_description, tuple(r["skill"] for r in requirements))
             best = _frame_letter(best, profile, meta or checks.parse_header(job_description), log)
+            # Checked again after the clean-up: it ran after the checks, and a BMW
+            # letter came out as one paragraph with no opening ("I am eager to apply
+            # these skills ...") with no warning (2026-10-03).
+            best_problems = check(best) + checks.gap_claims(best, forbidden)
+            if lang == "en" and any(p.startswith("cover letter has") for p in best_problems):
+                log("After removing unsupported sentences the cover letter was too short; "
+                    "assembling it from your profile instead.")
+                best = profile_letter(profile, meta or checks.parse_header(job_description),
+                                      list(requirements), [g for g in gaps.split(", ") if g])
+                built = True
+                best_problems = check(best) + checks.gap_claims(best, forbidden)
+                issues.append("cover letter: assembled from profile.json because too little "
+                              "survived the fact-check and clean-up - it is true but plain; "
+                              "personalise it before sending")
         style = checks.predictability(best or "", _sentence_logprobs(best or "", drafts))
         style["problems"] = checks.style_problems(best or "")
         style["built_from_profile"] = built
@@ -1183,7 +1686,7 @@ def _sentence_logprobs(text: str, drafts: list) -> dict:
     return out
 
 
-def _style_pass(text, drafts, facts, call, log, profile, forbidden, known, check):
+def _style_pass(text, drafts, facts, call, log, profile, forbidden, known, check, write=None):
     """One rewrite of a fact-checked letter for style only (the "write like a
     human" rules), kept only if it passes the fact-check without losing anything,
     still has letter shape, and reads less machine-like."""
@@ -1196,8 +1699,8 @@ def _style_pass(text, drafts, facts, call, log, profile, forbidden, known, check
     predictable = [s for s, lp in flat if 2.718281828 ** (-sum(lp) / len(lp)) < 2.5]
     log(f"Revising the cover letter's wording (predictability {before['score']}/100, "
         f"{len(problems)} style note(s))...")
-    raw = _preclean(call(prompts.style_fix_prompt(text, problems or ["read less predictable"],
-                                                  predictable), max_tokens=1200, logprobs=True))
+    raw = _preclean((write or call)(prompts.style_fix_prompt(text, problems or ["read less predictable"],
+                                                             predictable), max_tokens=1200, logprobs=True))
     drafts.append(last_logprobs())
     try:
         fixed, removed = factcheck(raw, facts, call, log, profile, forbidden, known=known)
@@ -1232,6 +1735,10 @@ def build_report(pkg: dict, region) -> str:
          "## Keyword fit",
          f"**Score:** {kw['score']}/100 (profile vs job ad, computed without the model)",
          ""]
+    if kw.get("hard"):
+        # Above the skill table: either one can rule the application out on its own.
+        L += [f"**⚠ Hard requirements you do not meet ({len(kw['hard'])}):**",
+              *[f"- {w}" for w in kw["hard"]], ""]
     reqs = pkg.get("requirements") or []
     if reqs:
         cov = planning.coverage(reqs)
@@ -1394,9 +1901,11 @@ def _first_chat_model(base_url):
 def prepare(job_description: str, region_code: str, profile_path: Path = None,
             recruiter: str = "", notes: str = "", model: str = DEFAULT_MODEL,
             api_key: str = None, backend: str = DEFAULT_BACKEND, base_url: str = None,
-            max_tokens: int = 1500, log=print) -> dict:
+            max_tokens: int = 1500, log=print, writers: str = None) -> dict:
     """Stages 1-4: check the profile, read the job, analyse gaps, plan the edits.
-    Nothing is written yet; the returned plan can be reviewed and edited."""
+    Nothing is written yet; the returned plan can be reviewed and edited.
+    `writers`: the model(s) that write the cover letter and recruiter message; when
+    empty, every model listed in `model` drafts, as before."""
     if not job_description.strip():
         raise PipelineError("Job description is empty.")
     profile = load_profile(profile_path or ROOT / "profile.json")
@@ -1411,23 +1920,28 @@ def prepare(job_description: str, region_code: str, profile_path: Path = None,
     # recruiter message); every listed model writes a cover-letter draft, in parallel.
     drafters = [m.strip() for m in (model or "").split(",") if m.strip()]
     model = drafters[0] if drafters else ""
-    if drafters:
+    chosen = [m.strip() for m in (writers or "").split(",") if m.strip()]
+    if chosen:
+        drafters = chosen
+    if model or drafters:
         # named models are loaded with the right context; no lms commands to type
-        ensure_models_loaded(drafters, base_url, log)
+        ensure_models_loaded(list(dict.fromkeys([model] + drafters)), base_url, log)
     if not model:
         model = _first_chat_model(base_url)
         if model:
             log(f"Using the loaded model: {model}")
     drafters = drafters or [model]
-    if len(drafters) > 1:
-        log(f"Judge model: {model}; cover-letter drafts by: {', '.join(drafters)}")
+    if len(drafters) > 1 or drafters[0] != model:
+        log(f"Judge model: {model}; letter written by: {', '.join(drafters)}")
     region = get_region(region_code)
     lang, jd_lang = checks.choose_language(job_description, profile)
     meta = checks.parse_header(job_description)
     kw = checks.keyword_report(profile, job_description, meta["role"])
-    degree = checks.degree_warning(job_description, profile)
-    if degree:
-        kw["reasons"] = list(kw["reasons"]) + [degree]
+    # Hard requirements the skill list never covers: a finished degree, a language.
+    hard = [w for w in (checks.degree_warning(job_description, profile),
+                        checks.language_warning(job_description, profile),
+                        checks.experience_warning(job_description, profile)) if w]
+    kw["hard"] = hard
 
     log(f"Region: {region.label}")
     log(f"Document language: {prompts.LANGUAGE_NAMES[lang]}"
@@ -1441,8 +1955,8 @@ def prepare(job_description: str, region_code: str, profile_path: Path = None,
                           base_url=base_url, max_tokens=max_tokens, schema=schema,
                           temperature=temperature, logprobs=logprobs)
 
-    if degree:
-        log(f"Watch out: {degree}.")
+    for w in hard:
+        log(f"Watch out: {w}.")
     log("Reading the job requirements...")
     if not (meta["role"] and meta["company"]):
         found = planning.job_identity(job_description, call)
@@ -1470,7 +1984,8 @@ def run(job_description: str, region_code: str, profile_path: Path = None,
         outputs_root: Path = None, style: str = "both", recruiter: str = "",
         notes: str = "", model: str = DEFAULT_MODEL, compile_pdf: bool = False,
         api_key: str = None, backend: str = DEFAULT_BACKEND, base_url: str = None,
-        max_tokens: int = 1500, cover: bool = True, approve=None, log=print):
+        max_tokens: int = 1500, cover: bool = True, approve=None, log=print,
+        writers: str = None):
     """Tailor the CV (and optionally a cover letter) for one job.
 
     The CV comes from profile.json; the model only rewords experience bullets,
@@ -1479,7 +1994,7 @@ def run(job_description: str, region_code: str, profile_path: Path = None,
     `notes` is extra truthful context for the cover letter.
     """
     prepared = prepare(job_description, region_code, profile_path, recruiter, notes, model,
-                       api_key, backend, base_url, max_tokens, log)
+                       api_key, backend, base_url, max_tokens, log, writers)
     if approve is not None:
         prepared = approve(prepared)
         if prepared is None:
@@ -1540,9 +2055,7 @@ def run(job_description: str, region_code: str, profile_path: Path = None,
                 # thin letter is never reported as "all checks passed".
                 pkg["issues"].append(f"{field}: the fact-check deleted {n} sentence(s) - reread "
                                      "it; the removed sentences are listed in report.md")
-    degree = checks.degree_warning(job_description, profile)
-    if degree:
-        pkg["issues"].append(degree)
+    pkg["issues"] += prepared["keywords"].get("hard", [])
 
     for n in exp_notes:
         log(n)

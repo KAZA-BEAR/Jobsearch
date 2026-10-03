@@ -124,7 +124,8 @@ for %%A in ("dist\EUJobSearch.exe") do set /a "SIZE_MB=%%~zA / 1048576"
 echo  [7/7] Built dist\EUJobSearch.exe  (!SIZE_MB! MB)
 echo.
 echo  The .exe runs on any Windows PC without Python. Your data lives in
-echo      %%APPDATA%%\EUJobSearch   (jobs database, sweep settings, CV outputs)
+echo      %%APPDATA%%\EUJobSearch   (jobs database, sweep settings)
+echo  CVs and cover letters are written to ats_outputs\ in the project folder.
 echo  Your profile.json is read from the file you pick with Browse (remembered),
 echo  else %%APPDATA%%\EUJobSearch, else next to or one folder above the .exe.
 echo.

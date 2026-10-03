@@ -360,6 +360,20 @@ def data_dir() -> Path:
     return path
 
 
+def outputs_dir() -> Path:
+    """Where generated CVs and letters go: ats_outputs in the project folder, not in
+    %APPDATA% with the database. The .exe is built into dist\\, so its project
+    folder is the one above; an .exe copied elsewhere uses its own folder."""
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        base = exe_dir.parent if exe_dir.name.lower() == "dist" else exe_dir
+    else:
+        base = Path(__file__).resolve().parent
+    path = base / "ats_outputs"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def settings_path() -> Path:
     """settings.json in the data folder: remembered profile, API keys, SEC email."""
     return data_dir() / "settings.json"

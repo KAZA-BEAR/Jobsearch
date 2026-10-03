@@ -87,5 +87,7 @@ them separately under their own terms:
 
 Job listings come from third-party APIs and websites, such as the Bundesagentur
 für Arbeit, EURES, EURAXESS, Personio, Workday, LinkedIn/Indeed via JobSpy,
-USAJOBS, Adzuna, MyCareersFuture and SEC EDGAR. Your use of each one is governed by that service's terms of
+USAJOBS, Adzuna, MyCareersFuture, SEC EDGAR, the Common Crawl URL index, Wikidata
+(CC0), the yc-oss mirror of the Y Combinator directory, the Hacker News Algolia API and
+the public job boards of Greenhouse, Ashby, Recruitee, Workable, Lever and SmartRecruiters. Your use of each one is governed by that service's terms of
 service. This license does not grant any rights to their data.

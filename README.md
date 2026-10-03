@@ -42,7 +42,7 @@ and by deterministic code checks before it reaches a document.
 | EURES | EU-wide jobs from the European Commission |
 | EURAXESS | PhD positions across Europe |
 | Employer ATS boards | Greenhouse, Lever, SmartRecruiters, Ashby, Recruitee, Workday, Personio |
-| Research institutes | Fraunhofer, DLR and other institute feeds (HiWi, thesis, PhD) |
+| Research & new employers | Fraunhofer, DLR, Max Planck, TH Deggendorf feeds, plus open-ended discovery: thousands of startup and company job boards from Common Crawl's public index, career pages of research institutes and engineering companies (Wikidata), Y Combinator startups and Hacker News "Who is hiring?" (`discover_jobs.py`) |
 | New companies | Funding signals and new employers per market (`company_radar.py`) |
 | LinkedIn / Indeed (optional) | via `python-jobspy` (free, no key) |
 | US / Asia | USAJOBS and Adzuna (free keys), MyCareersFuture (Singapore), employer ATS boards |
@@ -192,40 +192,48 @@ one folder above it → the copy bundled into the `.exe` (last resort; the log w
 
 ## Using the app
 
-The window has six tabs:
+A sidebar on the left has five pages. Searches run in the background; the status bar
+at the bottom shows progress and the latest message, and **Activity log** opens the
+full log.
 
-| Tab | Purpose |
+| Page | Purpose |
 |---|---|
-| **Graduate & PhD** | EURAXESS PhD positions, graduate employer boards, research institutes |
-| **Job boards** | Bundesagentur, EURES, Personio, Workday, Adzuna (Europe), LinkedIn/Indeed (JobSpy) |
-| **US & Asia** | USAJOBS, Adzuna, MyCareersFuture, and hiring-calendar notes per market |
-| **New companies** | companies and startups newly hiring |
-| **Applications** | daily sweep, application tracker, and the CV & cover-letter generator |
-| **Unit tests** | checks that the job sources answer, LM Studio has the CV models, and the PC can run them |
+| **Jobs** | every job found so far, best fit first: search, filter (All / New / Last 24h / Tracked, Fit ≥), tailor a CV, track |
+| **Find jobs** | one source at a time, grouped: Germany (Arbeitsagentur, Personio, Workday), Europe (EURES internships, Adzuna, LinkedIn/Indeed), PhD & research (EURAXESS, research institutes and new employers, graduate employer boards), US & Asia (USAJOBS, Adzuna, MyCareersFuture, market notes). Each source shows only its search fields; its checkboxes (countries, sites, sources, "only graduate titles"…) are under **Advanced filters ▸**, which shows what is ticked while closed. Starting a search switches to Jobs, where new rows appear in green |
+| **Applications** | application tracker and the CV & cover-letter generator |
+| **New companies** | companies and startups newly hiring, and their job boards |
+| **Settings** | CV models and server, profile, API keys, daily sweep, SEC email, health checks |
+
+The **daily sweep** runs every enabled source in one go: **Run sweep now** at the bottom
+of the sidebar, or schedule it under Settings → **Daily sweep…**.
 
 **Generating a CV and cover letter**
-1. Open **Applications**. Paste a job ad into *Job description*, or double-click a job
-   in the results list to fill it in.
-2. Check *Region* (sets photo / date of birth / nationality conventions), *Style*
-   (`ats`, `styled` or `both`), *Cover letter* and *Compile PDF*.
-3. *Model* defaults to `qwen/qwen3-4b-2507,llama-3.2-3b-instruct` — leave it.
-4. Press **Generate**. With *Review plan* ticked, a window shows which requirements you
-   meet and which bullets may be reworded; untick bullets to keep them word for word,
-   then **Write CV**.
-5. The status line shows the fit and any warnings; **Outputs folder** opens the files.
-   Read `report.md` — it lists every sentence the fact-check removed.
+1. Double-click a job under **Jobs** (or select it and press **Tailor CV**). Applications
+   opens with the job description filled in; you can also paste one.
+2. **Options ▸** holds *Region* (photo / date of birth / nationality conventions),
+   *CV style* (`ats`, `styled` or `both`), *Cover letter*, *Review plan first*,
+   *Compile PDF*, the recruiter's name and extra context for the letter.
+3. The judge and letter-writer models are set once under **Settings** — leave the
+   defaults unless you have changed models in LM Studio.
+4. Press **Generate**. With *Review plan first* ticked, a window shows which
+   requirements you meet and which bullets may be reworded; untick bullets to keep them
+   word for word, then **Write CV**.
+5. The line under the buttons shows the fit and any warnings; **More ▾ → Open outputs
+   folder** opens the files. Read `report.md` — it lists every sentence the fact-check
+   removed.
 
-Right-click jobs in the results to track them (saved, applied, interview…). **Summary**
-logs counts by source, type, market and company. **Fit score** (next to the job
-description) scores pasted text without adding it to the list.
+To track a job, select it under **Jobs** and use **Track ▾** (or right-click it).
+**More ▾** on the Jobs page exports the visible jobs, logs a summary by source, type,
+market and company, re-scores against your profile, and deletes untracked jobs.
+**Fit score** (Applications) scores pasted text without adding it to the list.
 
-**API keys** (status bar) stores the free keys for USAJOBS and Adzuna in `settings.json`. A key saved there overrides an environment
-variable of the same name. The US and Asia employer boards are under Graduate & PhD →
-Graduate employer boards → *Region*.
+**Settings → API keys…** stores the free keys for USAJOBS and Adzuna in `settings.json`.
+A key saved there overrides an environment variable of the same name. The US and Asia
+employer boards are under Find jobs → Graduate employer boards → *Region*.
 
 Everything the command-line scripts below can do is also in the app.
 
-**Daily sweep** (Applications → Settings…) can also cover Adzuna Europe and the US and
+**Daily sweep** (Settings → Daily sweep…) shows only the fit alert and the Windows schedule; the sources, startup/notification options and search terms are in sections you open (**Sources ▸**, **Startup & notifications ▸**, **Search terms ▸**), each showing a summary while closed. It can also cover Adzuna Europe and the US and
 Asia-Pacific: US & Asia employer boards, USAJOBS, Adzuna and MyCareersFuture. They are
 off by default. Set their search terms, countries and posting age in the same window.
 Adzuna Europe searches by role (e.g. `Werkstudent`) plus any of a list of field words
@@ -235,8 +243,8 @@ and field words empty to use each country's defaults in its own language. The sc
 Windows task reads the keys saved under **API keys** too, and skips a keyed source whose
 key is missing.
 
-**Unit tests** runs health checks. Each one reports pass, warn, fail or skip, and selecting
-a row shows the full reason. **Copy report** puts the results on the clipboard.
+**Settings → Health checks** reports pass, warn, fail or skip for each check, and
+selecting a row shows the full reason. **Copy report** puts the results on the clipboard.
 - *APIs*: each job source answers a small real search. Keyed sources are skipped
   without a key. JobSpy is
   only checked as installed, because a test scrape of LinkedIn risks a temporary block.
@@ -272,6 +280,8 @@ python robotics_track.py phd --field robotics --countries DE,NL,SE,CH
 python us_asia_jobs.py --help              # US / Asia-Pacific sources
 python jobspy_provider.py search "robotics engineer" --location Berlin --pages 2
 python linkedin_jobs.py export jobs.csv
+python discover_jobs.py crawl wikidata yc hn --region germany   # find new employers
+python discover_jobs.py sites https://www.example-robotics.de   # read any company or lab site
 ```
 
 ---
@@ -364,12 +374,13 @@ source. Contains the job database (`robotics_jobs.db`), `company_radar.db`,
 | `ats_regions.py` | per-market conventions (photo, date of birth, nationality) |
 | `fit_score.py` | 0–100 fit score and profile lookup |
 | `daily_sweep.py` | once-a-day sweep and Windows task |
-| `system_checks.py` | the Unit tests tab's API, LM Studio and hardware checks |
+| `system_checks.py` | the health checks (Settings): API, LM Studio and hardware |
 | `linkedin_jobs.py` | job model, SQLite store, shared HTTP helpers, LinkedIn APIs |
 | `eu_student_jobs.py` | EURES and student-job classification |
 | `robotics_track.py` | EURAXESS PhDs and employer ATS boards |
 | `ba_jobsuche.py`, `personio_jobs.py`, `workday_jobs.py`, `research_jobs.py` | further sources |
 | `company_radar.py` | newly hiring companies |
+| `discover_jobs.py` | open-ended discovery: Common Crawl job boards, career-page detector, Wikidata, YC, HN |
 | `us_asia_jobs.py` | US / Asia-Pacific sources |
 | `jobspy_provider.py`, `install_jobspy.py` | optional LinkedIn/Indeed engine |
 | `build.bat`, `jobsearch.spec` | Windows build |

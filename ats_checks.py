@@ -31,7 +31,7 @@ during either english every excellent experience experiences first following
 friendly future general german germany great having however ideal including
 information interest interested international looking making means months
 opportunity other others people please position possible practical preferred
-provide provides qualification qualifications related relevant required
+provide provides qualification qualifications related relevant required similar
 requirements research responsibilities should skills strong student students
 support their there these thing things those through together topics under
 understanding university using various where which while within without working
@@ -92,7 +92,11 @@ def parse_header(job_description: str) -> dict:
     """Role/company/city from the 'Position: / Company: / Location:' lines the
     app puts at the top of a job description (empty when pasted by hand)."""
     meta = {"role": "", "company": "", "city": ""}
-    for line in job_description.splitlines()[:8]:
+    lines = job_description.splitlines()
+    # Header lines only: the ad text's own "Location: DITZINGEN ... We Say HI* ..."
+    # (Workday) would otherwise replace the city with 2,000 characters.
+    for i in sorted(_header_rows(job_description)):
+        line = lines[i]
         m = re.match(r"\s*(position|company|location)\s*:\s*(.+)", line, re.I)
         if m:
             key = {"position": "role", "company": "company", "location": "city"}[m.group(1).lower()]
@@ -100,19 +104,112 @@ def parse_header(job_description: str) -> dict:
     return meta
 
 
+# EURES and some feeds deliver the whole ad as one line: "... Was bringst du mit?
+# - Studium der Elektrotechnik. - Umfangreiche Erfahrung mit Matlab Simulink. ...".
+# With no line breaks no heading was found, the whole ad went to the model, and the
+# PhD's tasks ("direct flux control") came back as requirements while "Matlab
+# Simulink" was missed (BMW ad, 2026-09-30).
+_INLINE_HEADING = re.compile(r"(?<=[.!?:])\s+([A-ZÄÖÜ][^.!?:\n]{2,45}[?:]"
+                             # a question sentence ends a section too: "Bringst du eine hohe
+                             # Einsatzbereitschaft mit ...? Dann bewirb dich jetzt!"
+                             r"|[A-ZÄÖÜ][^.!?\n]{2,150}\?)(?=\s|$)")
+_INLINE_BULLET = re.compile(r"\s+[-•*]\s+(?=[A-ZÄÖÜ0-9])")
+# DLR's feed has headings with no ":" or "?" at all: "... What to expect The Embedded
+# ... Your tasks Developing ... Your profil A completed university degree ..."
+# (DLR real-time systems ad, 2026-09-30). Matched only with a capital letter
+# after them, so "about your tasks in the team" stays prose.
+_KNOWN_HEADING = re.compile(
+    r"(?<=\S)\s+(What to expect|What you can expect|Your tasks|Your responsibilities|"
+    r"Your role|Your profile|Your profil|Your qualifications|What you bring|"
+    r"What we expect|What we offer|We offer|Our offer|Nice to have|Requirements|"
+    r"Qualifications|"
+    r"Deine Aufgaben|Ihre Aufgaben|Dein Profil|Ihr Profil|Wir bieten|Das bieten wir|"
+    r"Was dich erwartet|Was Sie erwartet)(?=\s+[A-ZÄÖÜ(])"
+    # Fraunhofer's fixed headings, followed by a lower-case word as often as not:
+    # "... Hier sorgen Sie für Veränderung Mitarbeit in Forschungsprojekten ...
+    # Hiermit bringen Sie sich ein abgeschlossenes wissenschaftliches Hochschulstudium
+    # ... Was wir für Sie bereithalten Möglichkeit zur Promotion ..." (2026-10-03)
+    r"|(?<=\S)\s+(Hier sorgen Sie für Veränderung|Hiermit bringen Sie sich ein|"
+    r"Was wir für Sie bereithalten|Was Sie bei uns tun|Was Sie mitbringen|"
+    r"Was Sie erwarten können|Das bringen Sie mit|Das erwartet Sie|Was wir Ihnen bieten|"
+    # Thales on Workday: "... Your mission as “Werkstudent ...”: Analyze ... document
+    # findings We are looking forward to: Student in Computer Science ..." (2026-10-03)
+    r"Your mission|We are looking forward to)"
+    r":?(?=\s)")     # "We are looking forward to: Student in ..." has the colon attached
+# Where the pay and contact text starts: "... spoken English Remuneration is based
+# on qualifications ...". A heading is put before it so the requirements end there.
+_OFFER_START = re.compile(
+    r"(?<=\S)\s+(?=(?:Remuneration|Salary|We look forward|If you have any questions|"
+    r"Die Vergütung|Wir freuen uns|Bei Fragen|"
+    # Thales' company text after the requirements: "... problem solving The Group
+    # invests more than €4,5 billion ... Say HI* - Your journey to us ..."
+    r"The Group invests|Say HI\* – Your journey)\b)")
+# Items of an unbulleted list: "... other relevant fields Several years' professional
+# experience ... Linux Experience working with the Linux kernel ... Python Very good
+# written and spoken English". A new item starts with a capitalised gerund
+# ("Developing", "Integrating") or a word that typically opens a requirement,
+# right after a lower-case word (so "under Linux" is not split).
+_ITEM_START = re.compile(
+    # -ing nouns are not item starts: "Radar Systems Engineering" was split in two (Thales)
+    r"(?<=[a-zäöüß0-9)’'])\s+(?=(?:(?!(?:Engineering|Training|Marketing|Manufacturing|Computing|"
+    r"Building|Housing|Banking|Accounting|Consulting|Shipping|Packaging|Printing|Recycling|"
+    r"Learning|Planning|Processing|Modeling|Modelling|Sensing|Machining|Welding|Engineering|"
+    r"Mapping|Tracking|Imaging|Rendering|Networking)\b)[A-Z][a-z]+ing|Several|Experience|"
+    r"In-depth|Programming|Very|"
+    r"Good|Excellent|Fluent|Strong|Solid|Sound|Knowledge|Familiarity|Proficiency|Ability|"
+    r"Basic|Hands-on|Participation|Completed|Initiative|Enthusiasm|Interest)\b)")
+
+
+def unflatten(text: str) -> str:
+    """Put inline headings and " - " bullets of a one-line ad on lines of their
+    own. Lines shorter than 400 characters are left alone: a normal ad already
+    has its line breaks, and " - " inside a title ("Ingenieur/in - Elektrotechnik")
+    must stay."""
+    out = []
+    for line in text.splitlines():
+        if len(line) >= 400:
+            line = _KNOWN_HEADING.sub(lambda m: "\n" + (m.group(1) or m.group(2)) + ":\n", line)
+            line = _OFFER_START.sub("\nTerms and contact:\n", line, count=1)
+            line = _INLINE_HEADING.sub(lambda m: "\n" + m.group(1) + "\n", line)
+            line = _INLINE_BULLET.sub("\n- ", line)
+            if "\n- " not in line:          # no bullets at all: split the bare items
+                line = _ITEM_START.sub("\n- ", line)
+        out.append(line)
+    return "\n".join(out)
+
+
+def _header_rows(job_description: str) -> set:
+    """Line numbers of the app's own header ("Position: / Company: / Location: /
+    Type: / Apply:"): short lines in the block before the first blank line. Workday
+    ad text starts "Location: DITZINGEN SRA OME, Germany We Say HI* Werkstudent ..."
+    as one 2,000-character line, and stripping every "Location:" line threw away the
+    whole Thales ad (2026-10-03)."""
+    rows = set()
+    for i, line in enumerate(job_description.splitlines()):
+        if not line.strip():
+            break
+        if _HEADER.match(line.strip()) and len(line) <= 200:
+            rows.add(i)
+    return rows
+
+
 def jd_excerpt(job_description: str, limit: int = 1800) -> str:
     """The ad's text without the app's header lines, trimmed to `limit` chars."""
-    body = "\n".join(l for l in job_description.splitlines() if not _HEADER.match(l.strip()))
+    header = _header_rows(job_description)
+    body = "\n".join(l for i, l in enumerate(job_description.splitlines()) if i not in header)
     body = re.sub(r"\n{3,}", "\n\n", body).strip()
     return body[:limit] + (" ..." if len(body) > limit else "")
 
 
 # Section headings that introduce what the candidate must / should bring.
 _REQ_HEADING = re.compile(
-    r"(qualific|requirement|your profile|profile:|you bring|you have|you should|we expect|"
+    r"(qualific|requirement|your profil|profile:|you bring|you have|you should|we expect|"
     r"what we('re| are) looking for|what you need|skills|a plus|nice.to.have|preferred|desirable|"
     r"bonus|experience in any|must.have|ihr profil|dein profil|anforderung|qualifikation|"
-    r"mitbringst|mitbringen|von vorteil|wünschenswert|kenntnisse)", re.I)
+    r"mitbringst|mitbringen|bringst du mit|bringen sie mit|bringen sie sich ein|von vorteil|"
+    r"we are looking forward to|"
+    r"wünschenswert|"
+    r"kenntnisse)", re.I)
 # "If your profile matches the requirements, please upload ..." is about applying.
 _NOT_REQ_HEADING = re.compile(r"(upload|documents|how to apply|send us|submit|unterlagen|"
                               r"bewerben|we offer|wir bieten|benefits)", re.I)
@@ -120,7 +217,11 @@ _NOT_REQ_HEADING = re.compile(r"(upload|documents|how to apply|send us|submit|un
 
 def _is_heading(line: str) -> bool:
     s = line.strip()
-    return 0 < len(s) <= 110 and (s.endswith(":") or s.endswith("?")) and not s.startswith(("-", "*", "•"))
+    # A question may be longer ("Bringst du eine hohe Einsatzbereitschaft mit und
+    # möchtest ... mitgestalten?" ends the BMW requirements); a long line ending in
+    # ":" is more often part of a list ("... at least one of the following tools:").
+    limit = 150 if s.endswith("?") else 110
+    return 0 < len(s) <= limit and (s.endswith(":") or s.endswith("?")) and not s.startswith(("-", "*", "•"))
 
 
 def requirement_sections(job_description: str) -> str:
@@ -129,7 +230,7 @@ def requirement_sections(job_description: str) -> str:
     inference, foundation models, ...') describes the field, not the candidate; read
     as requirements it once turned background prose into 'required' gaps. Returns
     the whole ad when it has no recognisable qualification headings."""
-    body = jd_excerpt(job_description, limit=20_000)
+    body = unflatten(jd_excerpt(job_description, limit=20_000))
     keep, on = [], False
     for line in body.splitlines():
         if _is_heading(line):
@@ -137,17 +238,56 @@ def requirement_sections(job_description: str) -> str:
         if on:
             keep.append(line)
     text = "\n".join(keep).strip()
-    return text if len(text) >= 80 else body
+    if len(text) >= 80:
+        return text
+    blocks = _requirement_blocks(body)
+    return blocks if len(blocks) >= 80 else body
+
+
+# What a block of the ad is about, by its lines. The Arbeitsagentur sends headings
+# as bare "# " lines, so the BSH ad's "- Studium: ...", "- Sprachkenntnisse: ..."
+# block could not be told from its tasks and benefits by heading (2026-10-03).
+_REQ_CUE = re.compile(
+    r"\b(studium|studiengang|studierende\w*|student|abschluss|degree|bachelor|master|kenntnis\w*|"
+    r"knowledge|erfahrung\w*|experience[ds]?|sprach\w*|deutsch\w*|englisch\w*|english|german|"
+    r"fließend|fluent|skills?|fähigkeit\w*|arbeitsweise|qualifi\w*|vorteil|wünschenswert|plus|"
+    r"proficien\w*|familiar|vertraut|verfügst|verfügen|mitbringst|you have|you bring|"
+    r"ability to|background in)\b", re.I)
+_TASK_CUE = re.compile(
+    r"\b(durchführung|unterstützung|mitwirkung|mitarbeit|aufbereitung|betreuung|aufgaben|"
+    r"you will|your tasks|responsib\w*|in this role)\b", re.I)
+_OFFER_CUE = re.compile(
+    r"\b(vergütung|gehalt|arbeitszeit\w*|urlaub|benefits?|mobile[ns]? arbeiten|homeoffice|"
+    r"flexib\w*|atmosphäre|wir bieten|we offer|salary|tarif\w*|zeitkonto|weiterbildung\w*|"
+    r"altersvorsorge|jobticket)\b", re.I)
+
+
+def _requirement_blocks(body: str) -> str:
+    """The blocks (split at "#" headings and blank lines) whose lines mostly read as
+    requirements, for ads without a recognisable qualifications heading."""
+    picked = []
+    for block in re.split(r"\n(?=#)|\n\s*\n", body):
+        lines = [l for l in block.splitlines() if l.strip(" #-")]
+        req = sum(bool(_REQ_CUE.search(l)) for l in lines)
+        task = sum(bool(_TASK_CUE.search(l)) for l in lines)
+        offer = sum(bool(_OFFER_CUE.search(l)) for l in lines)
+        if req >= 2 and req > task and req > offer:
+            picked.append(block.strip())
+    return "\n\n".join(picked)
 
 
 def or_groups(job_description: str) -> list[str]:
     """Ad lines that list alternatives ('Python, C++ and/or Matlab', 'ROS oder ROS2'):
     meeting any one item of such a line meets the line."""
     # a line that continues in lower case was wrapped ("... testing or data\n\nevaluation.")
-    text = re.sub(r"\s*\n\s*(?=[a-zäöü])", " ", job_description)
+    text = re.sub(r"\s*\n\s*(?=[a-zäöü])", " ", unflatten(job_description))
+    # Over 250 characters it is not one list item but unsplit text: the DLR ad's
+    # whole profile section, read as one "A or B" line, made "Linux kernel
+    # development" count as met "via Python programming".
     return [l.strip() for l in re.split(r"[\n•;]|(?<=[.!?])\s+", text)
-            if re.search(r"\band/or\b|\bor\b|\boder\b|\bbzw\.?|at least one|one of the following|"
-                         r"mindestens (ein|eine|einem|einer)\b", l, re.I)]
+            if len(l.strip()) <= 250
+            and re.search(r"\band/or\b|\bor\b|\boder\b|\bbzw\.?|at least one|one of the following|"
+                          r"mindestens (ein|eine|einem|einer)\b", l, re.I)]
 
 
 _MASTER_REQ = re.compile(
@@ -155,6 +295,13 @@ _MASTER_REQ = re.compile(
     r"completed (university |master'?s? )?degree|abgeschlossene[snm]?\s+(master|hochschul|universitäts|"
     r"wissenschaftliche)|masterabschluss|diplom\b)", re.I)
 _DOCTORAL = re.compile(r"(doctoral|\bph\.?\s?d\b|promotion|doktorand|dissertation)", re.I)
+# "Erfolgreich abgeschlossenes Studium der Elektrotechnik" (BMW PhD ad) names no
+# degree level. For a doctoral position a finished study means a finished master's;
+# for other roles a bachelor's may do, so this only counts in doctoral ads.
+_STUDIES_DONE = re.compile(
+    r"((erfolgreich\s+)?abgeschlossene[snm]?\s+(studium|studiums|hochschulstudium)|"
+    r"(successfully\s+)?completed\s+(studies|university studies|degree)|"
+    r"studium\s+erfolgreich\s+abgeschlossen)", re.I)
 
 
 def degree_warning(job_description: str, profile: dict) -> str:
@@ -162,9 +309,16 @@ def degree_warning(job_description: str, profile: dict) -> str:
     profile's master's is still in progress - the one requirement that can
     disqualify an application outright, which the skill list never covers."""
     body = jd_excerpt(job_description, limit=20_000)
-    m = _MASTER_REQ.search(body)
+    m = _MASTER_REQ.search(body) or (_DOCTORAL.search(body) and _STUDIES_DONE.search(body))
     if not m:
         return ""
+    # "A completed university degree (Master's / Bachelor's)" (DLR ad): a finished
+    # bachelor's is enough, so no warning for a candidate who has one.
+    if re.search(r"bachelor|\bb\.?\s?(sc|eng|a)\b", body[m.start():m.end() + 150], re.I):
+        bachelors = [e for e in profile.get("education") or []
+                     if re.match(r"\s*(b\.?\s?(sc|eng|a)\b|bachelor)", e.get("degree", ""), re.I)]
+        if any(str(e.get("status", "")).lower() == "completed" for e in bachelors):
+            return ""
     masters = [e for e in profile.get("education") or []
                if re.match(r"\s*(m\.?\s?(sc|eng|a)\b|master)", e.get("degree", ""), re.I)]
     if any(str(e.get("status", "")).lower() == "completed" for e in masters):
@@ -174,10 +328,135 @@ def degree_warning(job_description: str, profile: dict) -> str:
     if not current:
         return ""
     e = current[0]
-    what = "a doctoral position" if _DOCTORAL.search(body) else "this role"
+    # Named from the job title: Fraunhofer's research-associate job mentions "Möglichkeit
+    # zur Promotion" in its text and was called "a doctoral position" (2026-10-03).
+    title = parse_header(job_description)["role"] or next(
+        (l for l in body.splitlines() if l.strip()), "")
+    what = "a doctoral position" if _DOCTORAL.search(title) else "this role"
     return (f"{what} requires a master's degree (\"{m.group(0).strip()}\"), and your "
             f"{e['degree']} is still in progress - check whether they accept candidates "
             "who graduate before the start date, and say when you expect to finish")
+
+
+# What German level an ad demands. The BMW PhD ad asked for "Sehr gute Deutsch-
+# und Englischkenntnisse"; with German at beginner level the only note was
+# "German-language posting", and the report counted 0 requirements not met.
+_CEFR = {"a1": 1, "a2": 2, "b1": 3, "b2": 4, "c1": 5, "c2": 6}
+_DE_STRONG = r"(sehr gute\w*|exzellente\w*|hervorragende\w*|verhandlungssichere\w*|fließende\w*)"
+_DE_GOOD = r"(gute\w*|solide\w*|fundierte\w*)"
+_LANG_CONTEXT = (r"(?=\s*(?:language|skills|proficiency|knowledge|\(|,|\.|;|\band\b|\bis\b|"
+                 r"\brequired\b|\bessential\b|$))")
+_GERMAN_REQ = (
+    # "Sehr gute Deutschkenntnisse", "sehr gute Englisch- und Deutschkenntnisse"
+    (re.compile(_DE_STRONG + r"\s+(?:[a-zäöü]+-\s+(?:und|oder|sowie)\s+)?deutsch", re.I), 5),
+    (re.compile(_DE_GOOD + r"\s+(?:[a-zäöü]+-\s+(?:und|oder|sowie)\s+)?deutsch", re.I), 4),
+    # "Deutsch fließend", "Deutsch verhandlungssicher"
+    (re.compile(r"\bdeutsch\w*\s+(fließend|verhandlungssicher)", re.I), 5),
+    # "fluent in German", "excellent German and English", "very good command of German".
+    # German must be followed by language context, so "a strong German brand" is not one.
+    (re.compile(r"\b(fluent|fluency|excellent|very good|business[- ]fluent|native)\b"
+                # same clause only: "Excellent command of English; German skills are an
+                # asset" paired "Excellent" with German (ZEISS, 2026-10-03)
+                r"[^.;,\n]{0,25}\bgerman\b" + _LANG_CONTEXT, re.I), 5),
+    (re.compile(r"\b(good|solid|strong)\b[^.;,\n]{0,25}\bgerman\b" + _LANG_CONTEXT, re.I), 4),
+    (re.compile(r"\bgerman\b[^.\n]{0,15}\b(fluent|fluency)\b", re.I), 5),
+)
+# "Deutsch auf C1-Niveau", "German (min. B2)"
+_GERMAN_CEFR = re.compile(r"\b(?:deutsch\w*|german)\b[^.\n]{0,25}?\b([abc][12])\b", re.I)
+
+
+def german_requirement(job_description: str) -> tuple[int, str]:
+    """(CEFR level the ad asks for, the phrase that says so), or (0, "")."""
+    body = jd_excerpt(job_description, limit=20_000)
+    best = (0, "")
+    m = _GERMAN_CEFR.search(body)
+    if m and not _OPTIONAL.search(body[m.end():m.end() + 60]):
+        best = (_CEFR[m.group(1).lower()], m.group(0))
+    for pattern, level in _GERMAN_REQ:
+        for m in pattern.finditer(body):
+            if level > best[0] and not _OPTIONAL.search(body[m.end():m.end() + 60]):
+                best = (level, m.group(0))
+    return best
+
+
+# "German skills are an asset but not required", "Deutschkenntnisse von Vorteil":
+# wanted, not required, so no hard requirement.
+_OPTIONAL = re.compile(r"^[^.;]{0,40}?\b(not required|not necessary|not a must|optional|an asset|"
+                       r"a plus|an advantage|advantageous|nice to have|preferred|von vorteil|"
+                       r"wünschenswert|keine voraussetzung|nicht erforderlich)\b", re.I)
+
+
+def language_warning(job_description: str, profile: dict) -> str:
+    """A warning when the ad asks for more German than the profile states - like a
+    missing degree, a hard requirement the skill list never covers."""
+    need, phrase = german_requirement(job_description)
+    have = FitScorer(profile).german_level
+    if not need or have >= need:
+        return ""
+    names = {1: "A1", 2: "A2", 3: "B1", 4: "B2", 5: "C1", 6: "C2"}
+    stated = next((str(l.get("level", "")) for l in profile.get("languages") or []
+                   if str(l.get("language", "")).lower() in ("german", "deutsch")), "")
+    return (f"the ad asks for German at about {names[need]} (\"{phrase.strip()}\"), and your "
+            f"profile gives your German as {stated or 'not stated'} - "
+            "a hard requirement you do not meet yet")
+
+
+# "Several years' professional experience in software development for embedded
+# real-time systems" (DLR ad) never became a requirement: the prompt asks for skills.
+_YEARS_REQ = (
+    (re.compile(r"\b(\d{1,2})\s*\+?\s*(?:or more\s+)?years?[’']?\s+(?:of\s+)?"
+                r"(?:relevant\s+|professional\s+|industry\s+|industrial\s+|work\s+|practical\s+)*"
+                r"experience", re.I), None),
+    (re.compile(r"\b(several|multiple)\s+years?[’']?\s+(?:of\s+)?(?:relevant\s+|professional\s+|"
+                r"industry\s+|work\s+|practical\s+)*experience", re.I), 3),
+    (re.compile(r"\b(many|extensive)\s+years?[’']?\s+(?:of\s+)?(?:relevant\s+|professional\s+|"
+                r"industry\s+|work\s+)*experience", re.I), 5),
+    (re.compile(r"\b(\d{1,2})\s*\+?\s*jahre\w*\s+(?:\w+\s+)?(?:berufs|praxis|projekt)?erfahrung", re.I), None),
+    (re.compile(r"\bmehrjährige\w*\s+(?:\w+\s+)?(?:berufs|praxis|projekt)?erfahrung", re.I), 3),
+    (re.compile(r"\blangjährige\w*\s+(?:\w+\s+)?(?:berufs|praxis|projekt)?erfahrung", re.I), 5),
+)
+_MONTHS = {m: i for i, m in enumerate(
+    "jan feb mar apr may jun jul aug sep oct nov dec".split(), 1)}
+
+
+def _month_index(text: str, today) -> int | None:
+    """'Nov 2022' / 'July 2023' / '2021' / 'Present' as a month count."""
+    t = str(text or "").strip().lower()
+    if t in ("present", "now", "current", "heute", "aktuell"):
+        return today.year * 12 + today.month
+    m = re.search(r"(\d{4})", t)
+    if not m:
+        return None
+    month = next((n for k, n in _MONTHS.items() if t.startswith(k)), 1)
+    return int(m.group(1)) * 12 + month
+
+
+def experience_months(profile: dict) -> int:
+    """Months of work in the profile's experience entries, overlaps not merged."""
+    from datetime import date
+    today, total = date.today(), 0
+    for e in profile.get("experience") or []:
+        start, end = _month_index(e.get("start"), today), _month_index(e.get("end"), today)
+        if start and end and end >= start:
+            total += end - start + 1
+    return total
+
+
+def experience_warning(job_description: str, profile: dict) -> str:
+    """A warning when the ad asks for more years of experience than the profile has."""
+    body = jd_excerpt(job_description, limit=20_000)
+    for pattern, years in _YEARS_REQ:
+        m = pattern.search(body)
+        if not m:
+            continue
+        need = years or int(m.group(1))
+        have = experience_months(profile)
+        if need and have < need * 12:
+            return (f"the ad asks for about {need} years of experience (\"{m.group(0).strip()}\"), "
+                    f"and your profile shows about {have / 12:.1f} years of work in total - "
+                    "check whether the role is open to graduates")
+        return ""
+    return ""
 
 
 def _profile_blob(profile: dict, notes: str = "") -> str:
@@ -270,6 +549,8 @@ together interests interested learning experience experiences projects project
 knowledge ability abilities skills skill quality qualities challenges challenge
 responsible responsibility ideas modern exciting excellent passionate motivated
 reliable reliably independently independent structured analytical thinking
+specialising specializing specialised specialized fields several in-depth
+forward personally enthuse approach
 """.split())
 
 
@@ -292,12 +573,52 @@ _LOCATION_LINE = re.compile(
     r"niedersachsen|on-site|remote|hybrid)\b", re.I)
 
 
+# German ad words that are not skills. The BMW ad's "terms not in your profile"
+# were "deinen, definierst, bringst, bewirb, e-mail, Stellenreferenz, Marken":
+# matched by prefix, so every inflection ("umfangreiche", "umfangreichen") goes.
+_DE_FILLER = ("erfolgreich", "abgeschlossen", "vergleichbar", "umfangreich", "sicher", "sehr",
+              "gute", "guten", "hohe", "hohen", "fundiert", "einschlägig", "ausgeprägt",
+              "selbstständig", "selbständig", "eigenständig", "strukturiert", "zuverlässig",
+              "idealerweise", "wünschenswert", "vorteil", "umgang", "mindestens", "verhandlungs",
+              "fließend", "deutsch", "englisch", "kenntniss", "erfahrung", "bereich", "studium",
+              "abschluss", "sprachkenntnis", "teamfähig", "kommunikation", "motivation",
+              "begeisterung", "interesse", "freude", "bewerb", "dein", "unser", "ihre", "eure",
+              "stellenreferenz", "karriere", "e-mail", "marken", "weiterhin", "außerdem", "zudem",
+              "insbesondere", "jeweilig", "aktuell", "zukünftig", "innovativ", "neue", "neuen",
+              "notwendig", "vergleichend", "definierst", "entwickelst", "bringst", "führst",
+              "bewirb", "möchte", "mitgestalt", "einsatzbereit", "laufend",
+              # from the requirement sections of the Fraunhofer and BSH ads (2026-10-03)
+              "hiermit", "bringen", "ausrichtung", "vorliegt", "beifüg", "notenübersicht",
+              "abschlusszeugnis", "hochschulstudium", "wissenschaftlich", "neugier", "tatendrang",
+              "eigeninitiative", "fachwissen", "arbeitsweise", "verfüg", "bereits", "theoretisch",
+              "dieses", "praktisch", "dynamisch", "unternehmen", "ergänz", "fortlaufend",
+              "fachrichtung", "ingenieurwesen", "wirtschaftsingenieur", "wort und", "schrift",
+              "interesse", "erste", "ideal", "insbesondere", "perspektivisch", "anleitung")
+# Ad word -> English word that means the same in the profile. A German ad against
+# an English profile listed "Regelung" as missing although the profile says
+# "control systems".
+_DE_EN = {"elektrotechnik": "electrical", "mechatronik": "mechatronic", "regelung": "control",
+          "regelungstechnik": "control", "steuerung": "control", "steuerungstechnik": "control",
+          "robotik": "robot", "informatik": "computer science", "maschinenbau": "mechanical",
+          "programmierung": "programming", "entwicklung": "develop", "bildverarbeitung": "vision",
+          "simulation": "simulation", "konstruktion": "cad", "sensorik": "sensor",
+          "elektronik": "electronic", "automatisierung": "automation", "leistungselektronik":
+          "power electronics", "softwareentwicklung": "software"}
+
+
+def _german_noise(word: str) -> bool:
+    return word.lower().startswith(_DE_FILLER)
+
+
 def keyword_report(profile: dict, job_description: str, title: str = "") -> dict:
     """Which job keywords the candidate has, which are missing, and a 0-100 fit."""
     scorer = FitScorer(profile)
     res = scorer.explain(Job(job_id="ats", title=title, company="", description=job_description))
     blob = _profile_blob(profile)
-    body = jd_excerpt(job_description, limit=10_000)
+    german = text_language(job_description) == "de"
+    # The qualification section when the ad has one: company blurbs, benefits and
+    # "how to apply" text gave "Marken", "Stellenreferenz" and "bewirb".
+    body = requirement_sections(job_description)
     # Not job skills: link text and web addresses ("homepage",
     # "working-student-ground-robotics-mfd") and short location lines ("Gilching,
     # Bayern, Germany") came out as "terms not in your profile".
@@ -311,7 +632,8 @@ def keyword_report(profile: dict, job_description: str, title: str = "") -> dict
     missing = [t for t, _ in counts.most_common()
                if t.lower() not in _STOP and t.lower() not in _HR_WORDS and t.lower() not in _COMMON
                and not _noise(t, names) and not _known(t, blob) and t.lower() not in own_name
-               and not t.lower().startswith("vacancy")][:15]
+               and not t.lower().startswith("vacancy")
+               and not (german and (_german_noise(t) or _DE_EN.get(t.lower(), "\0") in blob))][:15]
     return {"score": res.score, "matched": res.matched, "reasons": res.reasons,
             "missing": missing}
 
@@ -724,7 +1046,7 @@ _ORG_NOISE = set("""robotics engineers engineer engineering gmbh club team study
 university national technische hochschule sciences technologies technology school college lab""".split())
 # Words too common across jobs to prove which organisation a sentence is about.
 _COMMON_WORK = set("""software hardware systems system design development documentation
-performance communication electrical engineer different across country national positions
+performance communication electrical engineer engineering different across country national positions
 heavy ground create future teams domains problem processes technologies interface
 interfaces variables maintaining identify""".split())
 
@@ -835,7 +1157,7 @@ def coursework_mixups(text: str, profile: dict) -> list:
 
 # Words that describe any work and prove nothing by themselves.
 _PLAIN = set("""systems system skills skill projects project tools tool experience exposure
-foundation background ability abilities knowledge understanding field fields areas area
+foundation background coding ability abilities knowledge understanding field fields areas area
 technical practical hands-on insight insights challenges challenge environment environments
 solutions solution tasks task methods approach approaches complex various different multiple
 teams team roles role studies program programme master's bachelor's degree
@@ -892,7 +1214,8 @@ def invented_details(text: str, profile: dict) -> list:
     processing', 'test cases that enhanced system reliability'."""
     stems = _profile_stems(profile)
     out = []
-    for sentence in re.split(r"(?<=[.!?])\s+", text or ""):
+    for original in re.split(r"(?<=[.!?])\s+", text or ""):
+        sentence = _aliases(original)
         if _LEARNING.search(sentence) or sentence.rstrip().endswith("?"):
             continue
         unknown = set()
@@ -913,7 +1236,8 @@ def invented_details(text: str, profile: dict) -> list:
             if _stem6(obj) not in stems and obj not in _PLAIN and obj not in _SOFT:
                 unknown.add(f"{m.group(1)}… {obj}")
         if unknown:
-            out.append((sentence.strip(), "adds " + ", ".join(sorted(unknown))
+            # the original sentence: the caller finds it in the letter by exact text
+            out.append((original.strip(), "adds " + ", ".join(sorted(unknown))
                         + " - not in your profile"))
     return out
 
@@ -934,7 +1258,21 @@ _JOB_LINK_STRONG = re.compile(
     r"(role|position|project|team|thesis|job)|to (this|the|your) (role|position|project|team))\b", re.I)
 
 
+_NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7}
+_SPELLED_DOF = re.compile(r"\b(one|two|three|four|five|six|seven|\d)[- ]degrees?[- ]of[- ]freedom\b",
+                          re.I)
+
+
+def _aliases(text: str) -> str:
+    """Spellings the profile writes differently: 'four-degree-of-freedom' is the
+    profile's '4-DOF' (a true manipulator sentence was deleted as 'adds
+    four-degree-of-freedom', Ubica 2026-10-03)."""
+    return _SPELLED_DOF.sub(lambda m: f"{_NUMBER_WORDS.get(m.group(1).lower(), m.group(1))}-DOF",
+                            text or "")
+
+
 def _content_stems(text: str) -> set:
+    text = _aliases(text)
     return {_stem6(w) for w in _WORD.findall(text)
             if w.lower() not in _STOP and w.lower() not in _VERBS and w.lower() not in _PLAIN
             and w.lower() not in _FILLER and w.lower() not in _SOFT
