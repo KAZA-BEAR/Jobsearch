@@ -9,6 +9,7 @@ photo.*
 *.db-shm
 *.db-wal
 embed_cache.json
+discovery_cache.json
 settings.json
 sweep_state.json
 

@@ -56,10 +56,18 @@ and by deterministic code checks before it reaches a document.
 **CV and cover-letter tailoring**
 - CV built from `profile.json` in code; the model only rewords bullets around keywords
   they already contain.
-- Optional cover letter and three-sentence recruiter message.
-- Requirement extraction, meaning-based matching and a gap report.
+- Optional cover letter and three-sentence recruiter message, written by a separate,
+  larger "writer" model and checked by a small "judge" model plus code.
+- **Cited letters:** every sentence the writer puts in a letter names the profile fact it is
+  based on, and is checked against that fact alone. A sentence that says more is
+  replaced with your profile's own wording.
+- At most four work or project examples per letter, the ones that best match the job,
+  each saying where it happened (employer or project).
+- Requirement extraction, meaning-based matching and a gap report, with warnings for hard
+  requirements you do not meet (language level, finished degree, years of experience).
 - Two LaTeX styles (plain ATS version and a styled version) for CV and letter.
-- Writing-style check with a predictability score ("does this read machine-written?").
+- Writing-style check with a predictability score ("does this read machine-written?"), and
+  a list of model-worded sentences for you to double-check before sending.
 
 ---
 
@@ -71,7 +79,9 @@ and by deterministic code checks before it reaches a document.
 - **[LM Studio](https://lmstudio.ai)** for the local models (CV/letter generation only)
 - **A LaTeX distribution** such as [MiKTeX](https://miktex.org) if you want PDFs
   generated automatically (otherwise you get `.tex` files)
-- A GPU with **6 GB VRAM** is enough for the default model pair
+- For the default models: a GPU with **6 GB VRAM** (tested on an RTX 3050 6 GB; LM
+  Studio keeps part of the models in system RAM) and **16 GB RAM** (8 GB minimum).
+  About 7 GB of disk for the three models.
 
 ---
 
@@ -116,22 +126,32 @@ Install LM Studio and download these models (search for them in LM Studio):
 
 | Role | Model | File |
 |---|---|---|
-| Judge + drafter | `qwen/qwen3-4b-2507` (Qwen3-4B-Instruct-2507) | Q4_K_M, ~2.5 GB |
-| Drafter | `llama-3.2-3b-instruct` | Q4_K_M, ~2.0 GB |
-| Embeddings | `text-embedding-nomic-embed-text-v1.5` | ~0.1 GB |
+| **Judge**: requirements, gap check, CV bullet edits, fact-check | `qwen/qwen3-4b-2507` (Qwen3-4B-Instruct-2507) | Q4_K_M, ~2.5 GB |
+| **Letter writer**: cover letter and recruiter message | `prism-ml/bonsai-27b` (Bonsai-27B) | Q1_0, ~3.8 GB |
+| **Embeddings**: meaning-based requirement matching | `text-embedding-nomic-embed-text-v1.5` | ~0.1 GB |
+
+The two jobs are split on purpose: the small judge models invented several letter
+sentences per job for the fact-check to delete, so a larger model writes and the small one
+checks. The writer runs at a low temperature (0.1) so it sticks to the facts.
 
 Start LM Studio's local server (Developer tab → Start Server, default
 `http://localhost:1234/v1`). **You do not need to load the models yourself:** before
-each run the app loads the model pair with LM Studio's `lms` tool, with a 6144-token
-context each, and unloads other chat models to make room on the GPU. The embedding
-model loads on first use.
+each run the app loads the judge and the writer with LM Studio's `lms` tool, with a
+6144-token context each, and unloads other chat models to make room on the GPU. The
+embedding model loads on first use. To use other models, change **Judge model** and
+**Letter writer** under Settings for the session, or set `ATS_MODELS` / `ATS_WRITER`
+(see [Configuration](#configuration)) to change the defaults; on the command line use
+`--model` / `--writer`.
 
 Notes from testing on an RTX 3050 (6 GB):
-- Qwen3-4B ~50 tokens/s, Llama 3.2 3B ~60 tokens/s; a full run takes about 75–100 s.
-- Avoid **Qwen3.5**-architecture models (e.g. Qwen3.5 4B): they ran at under 2 tokens/s
-  in LM Studio on this GPU.
-- Larger models (e.g. `prism-ml/bonsai-27b`) can be used by typing their name into the
-  Model field; they are slower but write more natural letters.
+- One job takes about **5–10 minutes** from plan approval to finished files with the
+  default models, most of it the 27B writer and the per-sentence fact-check.
+- Bonsai-27B is a 1-bit (Q1_0) model on the Qwen3.5 architecture and runs fine. Other
+  **Qwen3.5**-architecture models at normal quantisations (e.g. Qwen3.5 4B) ran at under
+  2 tokens/s on this GPU — avoid them.
+- A small writer such as `llama-3.2-3b-instruct` is much faster, but more of its letter
+  sentences are cut by the fact-check, so letters more often fall back to the plain
+  version built from your profile.
 
 ---
 
@@ -192,9 +212,9 @@ one folder above it → the copy bundled into the `.exe` (last resort; the log w
 
 ## Using the app
 
-A sidebar on the left has five pages. Searches run in the background; the status bar
-at the bottom shows progress and the latest message, and **Activity log** opens the
-full log.
+A sidebar on the left has five pages, in a dark theme that is easy on the eyes over long
+sessions. Searches run in the background; the status bar at the bottom shows progress
+and the latest message, and **Activity log** opens the full log.
 
 | Page | Purpose |
 |---|---|
@@ -213,14 +233,18 @@ of the sidebar, or schedule it under Settings → **Daily sweep…**.
 2. **Options ▸** holds *Region* (photo / date of birth / nationality conventions),
    *CV style* (`ats`, `styled` or `both`), *Cover letter*, *Review plan first*,
    *Compile PDF*, the recruiter's name and extra context for the letter.
-3. The judge and letter-writer models are set once under **Settings** — leave the
-   defaults unless you have changed models in LM Studio.
+3. The judge and letter-writer models are under **Settings** (*Judge model*,
+   *Letter writer*) — leave the defaults unless you use other models in LM Studio.
 4. Press **Generate**. With *Review plan first* ticked, a window shows which
    requirements you meet and which bullets may be reworded; untick bullets to keep them
    word for word, then **Write CV**.
 5. The line under the buttons shows the fit and any warnings; **More ▾ → Open outputs
-   folder** opens the files. Read `report.md` — it lists every sentence the fact-check
-   removed.
+   folder** opens the files. Read `report.md` before sending anything — see
+   [Output files](#output-files) for what each section means.
+
+If the job's required skills are all missing from your profile, the app writes the CV
+and the report but **no cover letter** ("no cover letter: none of the required skills are
+in your profile"): a letter could only list unrelated experience.
 
 To track a job, select it under **Jobs** and use **Track ▾** (or right-click it).
 **More ▾** on the Jobs page exports the visible jobs, logs a summary by source, type,
@@ -262,7 +286,8 @@ The checks change nothing: no jobs are stored and no models are loaded.
 ```bash
 # CV + letter for one job, headless (same pipeline and defaults as the Generate button)
 EUJobSearch.exe --ats job.txt --region DE
-EUJobSearch.exe --ats job.txt --model "prism-ml/bonsai-27b"
+# other models: --model is the judge, --writer writes the letter
+EUJobSearch.exe --ats job.txt --model "qwen/qwen3-4b-2507" --writer "llama-3.2-3b-instruct"
 
 # Daily sweep (what the scheduled Windows task runs)
 EUJobSearch.exe --sweep
@@ -291,26 +316,43 @@ python discover_jobs.py sites https://www.example-robotics.de   # read any compa
 ```
 job ad ──► 1  requirements (quote-verified) + job title/company
            2  gap analysis: vocabulary → meaning-based matching (embeddings)
-              → model verifies the top-3 profile lines ("yes / partly / no")
+              → judge verifies the top-3 profile lines ("yes / partly / no");
+              a job or project bullet naming the skill beats a skills-list line
            3  rewrite plan (you can review it)
-           4  CV bullets reworded one at a time, each checked
-           5  cover letter: every model drafts in parallel
-              → each draft fact-checked (model + code) → merged in code
-              → opening/closing added → style-only revision (fact-checked again)
-              → too little true text left? letter built from profile.json instead
-           6  recruiter message (3 sentences), fact-checked the same way
+           4  CV bullets reworded one at a time by the judge, each checked
+           5  cover letter by the writer, from numbered facts (F1, F2, …):
+              every sentence cites the fact(s) it uses
+              → each sentence checked against its own cited facts (judge + code);
+                one that says more is replaced with the profile's own line
+              → at most 4 work/project examples, ranked by relevance to the job;
+                each says where it happened
+              → whole-letter fact-check (judge + code) → clean-up (padding,
+                repeats, job-ad talk) → opening/closing added
+              → short but true? split into paragraphs, add your courses and
+                languages; still too little? letter built from profile.json instead
+           6  recruiter message (3 sentences): intro, one real job or project
+              example, one question; fact-checked the same way
            7  LaTeX → PDF, report.md
 ```
 
-**What the checks guard against** (all in `ats_checks.py`, run in code):
+**What the checks guard against** (deterministic code in `ats_checks.py` and
+`ats_pipeline.py`, on top of the judge model):
 - claiming a requirement you do not meet, or a skill/tool not in your profile
+- adding a tool to a fact that does not mention it ("…ANSYS workflows using Python")
 - inflation ("led", "expertise", "extensive"), made-up numbers, "1 feature" → "features"
 - merging two bullets into one claim, or attaching work to the wrong employer/project
-- research interests presented as experience, coursework or "focus"
-- an unfinished degree mentioned without saying so
-- "keen to learn X" when X is already in your profile
-- text copied from the job ad or addressed to the reader ("you will…")
+- "This reduced downtime…" placed after a different example than the one it belongs to
+- research interests presented as experience, coursework, skills or "focus"
+- an unfinished degree mentioned without saying so; schools renamed or translated
+- "keen to learn X" when X is already in your profile, and empty "keen to learn about the
+  role" lines
+- text copied from the job ad or addressed to the reader ("you will…"), restating
+  the job's requirements, and tool lists longer than three items
+- the same place named in every sentence ("As a … at …, I …" → "There, I also …")
 - CV bullets that drop a number, tool or action verb, add buzzwords, or repeat words
+
+Job titles and company names with abbreviations ("Stud. Assistant", "H. & W. … GmbH",
+"o.ä.") are kept whole, so their dots are not read as sentence ends.
 
 **Writing style.** Prompts follow a "write like a person" style guide (plain words,
 varied sentence length, no stock AI phrases, no lists of three). `report.md` includes a
@@ -322,7 +364,9 @@ estimate, not an AI-detector result.
 
 ## Output files
 
-Each run writes to `ats_outputs\<company>_<role>_<date>\` in the data folder:
+Each run writes to `ats_outputs\<company>_<role>_<date>\` in the **project folder** (the
+folder above `dist\` for the `.exe`; an `.exe` copied elsewhere uses its own folder). The
+folder is in `.gitignore`.
 
 | File | Content |
 |---|---|
@@ -331,8 +375,23 @@ Each run writes to `ats_outputs\<company>_<role>_<date>\` in the data folder:
 | `cover_letter_ats.tex/.pdf` | plain cover letter |
 | `cover_letter_styled.tex/.pdf` (+ `info.tex`, `body.tex`) | styled cover letter |
 | `recruiter_message.txt` | short message for LinkedIn / email |
-| `report.md` | fit, requirements, gaps, removed sentences, writing style, warnings |
+| `report.md` | what was generated and everything you should check (below) |
 | `tailored_experience.json` | the reworded experience section and notes |
+
+**`report.md` sections** (a section appears only when it has something to say):
+
+| Section | Meaning |
+|---|---|
+| Keyword fit | score, requirements met / missed with the proof line for each, hard requirements you do not meet |
+| What was generated | per job: bullets reworded, reordered or kept |
+| Writing style | predictability score for the letter and the recruiter message |
+| Removed by the fact-check | sentences cut as unsupported by your profile, and why; repaired ones show the replacement |
+| Left out to keep the letter to 4 examples | true facts dropped as less relevant to this job |
+| The model's draft that was replaced | when the letter fell back to the plain profile version: the reason and the draft |
+| Removed by the clean-up | padding, repeats and job-ad talk taken out |
+| Checks that still fail | warnings to act on (e.g. German level, unfinished degree, letter built from the profile) |
+| Sentences to double-check | sentences the model worded itself; they passed every check, but only you know if each is exactly right |
+| Notes | e.g. how many sentences the fact-check changed |
 
 For a signature and photo, put `sig.png` and `profile_pic.png` in
 `%APPDATA%\EUJobSearch\assets\` (the photo is used only where the region expects one).
@@ -343,16 +402,19 @@ For a signature and photo, put `sig.png` and `profile_pic.png` in
 
 **Data folder:** `%APPDATA%\EUJobSearch` for the `.exe`; the project folder when run from
 source. Contains the job database (`robotics_jobs.db`), `company_radar.db`,
-`sweep_config.json`, `sweep_state.json`, `settings.json` (remembered profile path, API keys, SEC contact email),
-`embed_cache.json` and `ats_outputs\`.
+`sweep_config.json`, `sweep_state.json`, `settings.json` (remembered profile path, API
+keys, SEC contact email, discovery options), `embed_cache.json` and `discovery_cache.json`.
+Generated CVs and letters go to `ats_outputs\` in the project folder instead (see
+[Output files](#output-files)).
 
 **Environment variables** (all optional; the API keys can also be set in the app):
 
 | Variable | Purpose |
 |---|---|
-| `ATS_MODELS` | default model list, e.g. `qwen/qwen3-4b-2507,llama-3.2-3b-instruct` |
+| `ATS_MODELS` | judge model, default `qwen/qwen3-4b-2507` |
+| `ATS_WRITER` | letter-writer model(s), default `prism-ml/bonsai-27b`; comma-separate several to draft in parallel |
 | `ATS_BASE_URL` | OpenAI-compatible server, default `http://localhost:1234/v1` |
-| `ATS_MODEL` | model used when the Model field is empty (default: the one LM Studio has loaded) |
+| `ATS_MODEL` | model used when the judge field is empty (default: the one LM Studio has loaded) |
 | `ATS_EMBED_MODEL` | embedding model, default `text-embedding-nomic-embed-text-v1.5` |
 | `JOBSEARCH_DATA_DIR` | override the data folder |
 | `JOBS_DB` | override the job database path |
@@ -394,9 +456,11 @@ source. Contains the job database (`robotics_jobs.db`), `company_radar.db`,
 | "Could not reach http://localhost:1234" | start LM Studio's server (Developer tab → Start Server) |
 | "Not downloaded in LM Studio: …" | download the named model in LM Studio |
 | "lms tool was not found" | install LM Studio's CLI (`~\.lmstudio\bin\lms.exe`) or load the models manually |
-| A model loads but is extremely slow | it is probably a Qwen3.5-architecture model — use the defaults |
+| A model loads but is extremely slow | it is probably a Qwen3.5-architecture model at a normal quantisation — use the defaults |
+| A job takes 5–10 minutes | normal with the 27B writer on a 6 GB GPU; a smaller writer is faster but its letters lose more to the fact-check |
 | "answer ran past its … token limit" | raise the model's context in LM Studio to 8k+ |
-| Cover letter says "built from your profile" | the drafts lost too much to the fact-check; the letter is true but plain — personalise it, or try a larger model |
+| Cover letter "assembled from profile.json" | the writer's draft lost too much to the fact-check; `report.md` shows the draft and the reason. The letter is true but plain — personalise it |
+| "no cover letter: none of the required skills are in your profile" | intentional: the CV is still written; a letter would have nothing relevant to say |
 | No PDFs | install MiKTeX/TeX Live and tick *Compile PDF*; missing packages install on first use |
 | "EUJobSearch.exe is running" during build | close the app first |
 
