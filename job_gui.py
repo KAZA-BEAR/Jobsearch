@@ -218,10 +218,14 @@ class App(tk.Tk):
 
     # ---------------- styling ----------------
 
-    # One light palette for the whole window; the sidebar is the only dark area.
-    BG, CARD, LINE = "#f4f5f7", "#ffffff", "#dde1e7"
-    TEXT, MUTED, ACCENT = "#1f2937", "#6b7280", "#2563eb"
-    SIDE, SIDE_FG, SIDE_DIM, SIDE_ON = "#1e293b", "#cbd5e1", "#8391a7", "#334155"
+    # One dark palette for the whole window (the light one was too bright for long
+    # sessions, 2026-10-04). Soft greys rather than black, text off-white.
+    BG, CARD, LINE = "#1b1e23", "#23272e", "#363c46"
+    TEXT, MUTED, ACCENT = "#e3e6ea", "#9aa3ae", "#4c8dff"
+    SIDE, SIDE_FG, SIDE_DIM, SIDE_ON = "#14161a", "#c9d1db", "#7d8796", "#2b313b"
+    FIELD, HEAD, SELECT, HOVER = "#2a2f37", "#2b3038", "#2f4a78", "#323946"
+    ROW_NEW, ROW_TRACKED, MENU_ON = "#1f3327", "#24314a", "#283a5e"
+    GOOD, WARN, BAD, LINK = "#5fd08a", "#f0b84a", "#f17b7b", "#7fa8ff"
 
     def _build_style(self) -> None:
         s = ttk.Style(self)
@@ -235,12 +239,17 @@ class App(tk.Tk):
         # own -font, which overrides the heading styles below.
         for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
             tkfont.nametofont(name).configure(family="Segoe UI", size=10)
-        s.configure(".", background=self.BG, foreground=self.TEXT, font=base)
+        # clam draws frame edges in light/dark bevel colours; keep them all on the line
+        # colour or every list and group box gets a white border
+        s.configure(".", background=self.BG, foreground=self.TEXT, font=base,
+                    bordercolor=self.LINE, lightcolor=self.LINE, darkcolor=self.LINE,
+                    troughcolor=self.BG, selectbackground=self.SELECT, selectforeground="white")
         s.configure("TFrame", background=self.BG)
         s.configure("TLabel", background=self.BG, foreground=self.TEXT)
         s.configure("TCheckbutton", background=self.BG)
         s.configure("TRadiobutton", background=self.BG)
-        s.configure("TLabelframe", background=self.BG, bordercolor=self.LINE)
+        s.configure("TLabelframe", background=self.BG, bordercolor=self.LINE,
+                    lightcolor=self.LINE, darkcolor=self.LINE)
         s.configure("TLabelframe.Label", background=self.BG, foreground=self.MUTED)
         s.configure("Card.TFrame", background=self.CARD, relief="solid", borderwidth=1)
         s.configure("Card.TLabel", background=self.CARD)
@@ -249,22 +258,91 @@ class App(tk.Tk):
         s.configure("H1.TLabel", font=("Segoe UI Semibold", 16))
         s.configure("H2.TLabel", font=("Segoe UI Semibold", 11))
         s.configure("Treeview", rowheight=28, background=self.CARD, fieldbackground=self.CARD,
-                    bordercolor=self.LINE)
-        s.configure("Treeview.Heading", font=("Segoe UI Semibold", 10), background="#eef0f3",
-                    relief="flat")
-        s.map("Treeview", background=[("selected", "#dbe7ff")], foreground=[("selected", self.TEXT)])
+                    foreground=self.TEXT, bordercolor=self.LINE, lightcolor=self.LINE,
+                    darkcolor=self.LINE)
+        s.configure("Treeview.Heading", font=("Segoe UI Semibold", 10), background=self.HEAD,
+                    foreground=self.TEXT, relief="flat", bordercolor=self.LINE)
+        s.map("Treeview.Heading", background=[("active", self.HOVER)])
+        s.map("Treeview", background=[("selected", self.SELECT)], foreground=[("selected", "white")])
+        # clam draws buttons, fields and scrollbars light unless told otherwise
+        edge = dict(bordercolor=self.LINE, lightcolor=self.FIELD, darkcolor=self.FIELD)
         # clam gives every button an 11-character minimum width; size to the label instead.
-        s.configure("TButton", padding=(10, 4), width=-4)
+        s.configure("TButton", padding=(10, 4), width=-4, background=self.FIELD,
+                    foreground=self.TEXT, **edge)
+        s.map("TButton", background=[("disabled", self.BG), ("pressed", self.SELECT),
+                                     ("active", self.HOVER)],
+              foreground=[("disabled", "#5d6570")])
         s.configure("Run.TButton", font=("Segoe UI Semibold", 10), padding=(14, 6),
-                    background=self.ACCENT, foreground="white", bordercolor=self.ACCENT)
-        s.map("Run.TButton", background=[("active", "#1d4ed8"), ("disabled", "#9db7f0")])
-        s.configure("Link.TButton", relief="flat", background=self.BG, foreground=self.ACCENT,
-                    padding=(4, 2), borderwidth=0)
+                    background=self.ACCENT, foreground="white", bordercolor=self.ACCENT,
+                    lightcolor=self.ACCENT, darkcolor=self.ACCENT)
+        s.map("Run.TButton", background=[("disabled", "#2f4166"), ("active", "#3a78e6")],
+              foreground=[("disabled", "#8a97ab")])
+        s.configure("Link.TButton", relief="flat", background=self.BG, foreground=self.LINK,
+                    padding=(4, 2), borderwidth=0, lightcolor=self.BG, darkcolor=self.BG)
         s.map("Link.TButton", background=[("active", self.BG)])
-        s.configure("Seg.Toolbutton", padding=(10, 4), relief="flat", background="#e6e9ee")
+        s.configure("Seg.Toolbutton", padding=(10, 4), relief="flat", background=self.FIELD,
+                    foreground=self.TEXT)
         s.map("Seg.Toolbutton",
-              background=[("selected", self.ACCENT), ("active", "#d5dceb")],
+              background=[("selected", self.ACCENT), ("active", self.HOVER)],
               foreground=[("selected", "white")])
+        for w in ("TEntry", "TCombobox", "TSpinbox"):
+            s.configure(w, fieldbackground=self.FIELD, foreground=self.TEXT, background=self.FIELD,
+                        insertcolor=self.TEXT, arrowcolor=self.TEXT, **edge)
+            s.map(w, fieldbackground=[("readonly", self.FIELD), ("disabled", self.BG)],
+                  foreground=[("disabled", self.MUTED)], bordercolor=[("focus", self.ACCENT)])
+        for w in ("TCheckbutton", "TRadiobutton"):
+            s.configure(w, foreground=self.TEXT, indicatorbackground=self.FIELD,
+                        indicatorforeground=self.TEXT, upperbordercolor=self.LINE,
+                        lowerbordercolor=self.LINE)
+            s.map(w, background=[("active", self.BG)],
+                  indicatorbackground=[("selected", self.ACCENT), ("active", self.HOVER)])
+        s.map("Card.TCheckbutton", background=[("active", self.CARD)])
+        for w in ("Vertical.TScrollbar", "Horizontal.TScrollbar"):
+            s.configure(w, background=self.FIELD, troughcolor=self.BG, arrowcolor=self.MUTED,
+                        **edge)
+            s.map(w, background=[("active", self.HOVER)])
+        s.configure("Horizontal.TProgressbar", background=self.ACCENT, troughcolor=self.FIELD,
+                    bordercolor=self.LINE, lightcolor=self.ACCENT, darkcolor=self.ACCENT)
+        s.configure("TNotebook", background=self.BG, bordercolor=self.LINE)
+        s.configure("TNotebook.Tab", background=self.FIELD, foreground=self.TEXT, bordercolor=self.LINE)
+        s.map("TNotebook.Tab", background=[("selected", self.CARD)])
+        s.configure("TPanedwindow", background=self.BG)
+        s.configure("Sash", sashthickness=6, gripcount=0, background=self.BG)
+        s.configure("TSeparator", background=self.LINE)
+        # plain tk widgets (text boxes, lists, menus, the combobox drop-down)
+        for pat, val in (("*Text.background", self.FIELD), ("*Text.foreground", self.TEXT),
+                         ("*Text.insertBackground", self.TEXT),
+                         ("*Text.selectBackground", self.SELECT),
+                         ("*Text.highlightBackground", self.LINE),
+                         ("*Listbox.background", self.FIELD), ("*Listbox.foreground", self.TEXT),
+                         ("*Listbox.selectBackground", self.SELECT),
+                         ("*Listbox.highlightBackground", self.LINE),
+                         ("*Canvas.background", self.BG), ("*Canvas.highlightThickness", 0),
+                         ("*Menu.background", self.CARD), ("*Menu.foreground", self.TEXT),
+                         ("*Menu.activeBackground", self.SELECT),
+                         ("*Menu.activeForeground", "white"),
+                         ("*TCombobox*Listbox.background", self.FIELD),
+                         ("*TCombobox*Listbox.foreground", self.TEXT),
+                         ("*TCombobox*Listbox.selectBackground", self.SELECT),
+                         ("*Toplevel.background", self.BG)):
+            self.option_add(pat, val)
+        self.after(50, lambda: self._dark_title_bar(self))
+
+    @staticmethod
+    def _dark_title_bar(win) -> None:
+        """Windows 10/11 dark title bar (DWMWA_USE_IMMERSIVE_DARK_MODE); ignored
+        elsewhere."""
+        try:
+            import ctypes
+            win.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
+            on = ctypes.c_int(1)
+            for attr in (20, 19):
+                if ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(on),
+                                                              ctypes.sizeof(on)) == 0:
+                    break
+        except Exception:
+            pass
 
     # ---------------- layout ----------------
 
@@ -518,7 +596,7 @@ class App(tk.Tk):
         self._source = label
         item, frame = self._sources[label]
         frame.pack(fill="both", expand=True, anchor="nw")
-        item.configure(bg="#e8efff", fg=self.ACCENT, font=("Segoe UI Semibold", 10))
+        item.configure(bg=self.MENU_ON, fg=self.LINK, font=("Segoe UI Semibold", 10))
         self._source_title.set(label)
 
     # ---------------- panel: PhD ----------------
@@ -1170,7 +1248,7 @@ class App(tk.Tk):
         self.track_tree.configure(yscrollcommand=vs.set)
         self.track_tree.pack(side="left", fill="both", expand=True)
         vs.pack(side="left", fill="y")
-        self.track_tree.tag_configure("due", foreground="#b00020")
+        self.track_tree.tag_configure("due", foreground=self.BAD)
         self.track_tree.bind("<<TreeviewSelect>>", self._on_track_select)
         self.track_tree.bind("<Double-1>", lambda _e: self._track_open())
 
@@ -1320,6 +1398,7 @@ class App(tk.Tk):
             dlg.lift()
             return
         dlg = tk.Toplevel(self)
+        dlg.after(20, lambda d=dlg: self._dark_title_bar(d))
         dlg.title("Daily sweep settings")
         dlg.transient(self)
         dlg.configure(bg=self.BG)
@@ -1927,8 +2006,8 @@ class App(tk.Tk):
         self.tests_tree.configure(yscrollcommand=sb.set)
         self.tests_tree.pack(side="left", fill="both", expand=True)
         sb.pack(side="left", fill="y")
-        for status, colour in (("pass", "#0b6b2e"), ("warn", "#9a6700"),
-                               ("fail", "#b00020"), ("skip", "#777777")):
+        for status, colour in (("pass", self.GOOD), ("warn", self.WARN),
+                               ("fail", self.BAD), ("skip", self.MUTED)):
             self.tests_tree.tag_configure(status, foreground=colour)
         self.tests_detail = tk.StringVar(value="")
         ttk.Label(tab, textvariable=self.tests_detail, foreground="#333", wraplength=1000,
@@ -1997,6 +2076,7 @@ class App(tk.Tk):
             dlg.lift()
             return
         dlg = tk.Toplevel(self)
+        dlg.after(20, lambda d=dlg: self._dark_title_bar(d))
         dlg.title("API keys")
         dlg.transient(self)
         self._keys_dlg = dlg
@@ -2010,7 +2090,7 @@ class App(tk.Tk):
             e.grid(row=i, column=1, sticky="w", padx=6, pady=2)
             entries[name] = e
             if url:
-                link = ttk.Label(f, text="get one", foreground="#3b6ea5", cursor="hand2")
+                link = ttk.Label(f, text="get one", foreground=self.LINK, cursor="hand2")
                 link.grid(row=i, column=2, sticky="w")
                 link.bind("<Button-1>", lambda _e, u=url: webbrowser.open(u))
         ttk.Label(f, foreground="#555", wraplength=460, justify="left",
@@ -2115,7 +2195,7 @@ class App(tk.Tk):
         self.radar_tree.pack(side="left", fill="both", expand=True)
         sb.pack(side="left", fill="y")
         self.radar_tree.bind("<Double-1>", lambda _e: self.open_radar_row())
-        self.radar_tree.tag_configure("hiring", background="#eef7ee")
+        self.radar_tree.tag_configure("hiring", background=self.ROW_NEW)
         ttk.Label(f, text="Double-click a company to open its job board or source.",
                   style="Muted.TLabel").pack(anchor="w", pady=(4, 0))
         self.load_radar()
@@ -2335,8 +2415,13 @@ class App(tk.Tk):
 
         # ── last result summary ───────────────────────────────────────────
         self.ats_result_var = tk.StringVar(value="")
-        ttk.Label(f, textvariable=self.ats_result_var, foreground="#226622",
-                  wraplength=480, justify="left").pack(anchor="w", pady=(6, 0))
+        # A fixed-height slot: a 3-line result used to push Generate up and the job
+        # description box down, so the buttons moved after every run.
+        slot = ttk.Frame(f, height=64)
+        slot.pack(side="bottom", fill="x", pady=(6, 0))
+        slot.pack_propagate(False)
+        ttk.Label(slot, textvariable=self.ats_result_var, foreground=self.GOOD,
+                  wraplength=520, justify="left").pack(anchor="nw")
 
     def _toggle_ats_options(self) -> None:
         if self._ats_opts.winfo_ismapped():
@@ -2362,6 +2447,7 @@ class App(tk.Tk):
 
     def _show_plan_dialog(self, prepared, box, done) -> None:
         dlg = tk.Toplevel(self)
+        dlg.after(20, lambda d=dlg: self._dark_title_bar(d))
         self._plan_dlg = dlg
         dlg.title("Review the tailoring plan")
         dlg.transient(self)
@@ -2383,7 +2469,7 @@ class App(tk.Tk):
         # A missing degree or language level can rule the application out on its own,
         # so it is shown before anything is written.
         for w in prepared["keywords"].get("hard", []):
-            ttk.Label(f, text=f"⚠ {w[0].upper()}{w[1:]}", foreground="#b00020",
+            ttk.Label(f, text=f"⚠ {w[0].upper()}{w[1:]}", foreground=self.BAD,
                       wraplength=780, justify="left").pack(anchor="w", pady=(2, 0))
 
         cols = ("status", "priority", "skill", "proof")
@@ -2738,9 +2824,9 @@ class App(tk.Tk):
         self.tree.bind("<Double-1>", self._on_result_double_click)
         self.tree.bind("<Button-3>", self._on_result_right_click)
         self.tree.bind("<<TreeviewSelect>>", self._on_result_select)
-        self.tree.tag_configure("new", background="#eef7ee")
-        self.tree.tag_configure("fresh", foreground="#0b6b2e")
-        self.tree.tag_configure("tracked", background="#eef2fb")
+        self.tree.tag_configure("new", background=self.ROW_NEW)
+        self.tree.tag_configure("fresh", foreground=self.GOOD)
+        self.tree.tag_configure("tracked", background=self.ROW_TRACKED)
 
         self.fit_detail = tk.StringVar(
             value="Double-click a job to tailor a CV for it · Ctrl+double-click opens the posting "
@@ -2841,7 +2927,7 @@ class App(tk.Tk):
         """The activity log, hidden until asked for: the status bar shows its last line."""
         self._log_box = box = ttk.Frame(parent, padding=(18, 0, 18, 0))
         self.console = tk.Text(box, height=9, wrap="word", font=("Consolas", 9), relief="flat",
-                               bg="#111827", fg="#d1d5db", insertbackground="white",
+                               bg="#121418", fg="#c9d1db", insertbackground="white",
                                padx=8, pady=6)
         cs = ttk.Scrollbar(box, orient="vertical", command=self.console.yview)
         self.console.configure(yscrollcommand=cs.set, state="disabled")
@@ -2861,11 +2947,8 @@ class App(tk.Tk):
         bar = ttk.Frame(parent, padding=(18, 6, 18, 8))
         bar.pack(side="bottom", fill="x")
         line.pack(side="bottom", fill="x")
-        self.status = tk.StringVar(value="Ready")
-        ttk.Label(bar, textvariable=self.status, style="H2.TLabel").pack(side="left")
-        self.last_msg = tk.StringVar(value="")
-        ttk.Label(bar, textvariable=self.last_msg, style="Muted.TLabel").pack(
-            side="left", padx=(14, 0))
+        # Right-hand controls first: pack gives space in order, and a long message
+        # packed before them squeezed the Stop button down to "S" (2026-10-04).
         self._log_btn = ttk.Button(bar, text="Activity log ▴", style="Link.TButton",
                                    command=self.toggle_log)
         self._log_btn.pack(side="right")
@@ -2873,6 +2956,11 @@ class App(tk.Tk):
         self.progress.pack(side="right", padx=10)
         self.cancel_btn = ttk.Button(bar, text="Stop", command=self.cancel, state="disabled")
         self.cancel_btn.pack(side="right")
+        self.status = tk.StringVar(value="Ready")
+        ttk.Label(bar, textvariable=self.status, style="H2.TLabel").pack(side="left")
+        self.last_msg = tk.StringVar(value="")
+        ttk.Label(bar, textvariable=self.last_msg, style="Muted.TLabel").pack(
+            side="left", padx=(14, 0))
 
     # ---------------- plumbing ----------------
 

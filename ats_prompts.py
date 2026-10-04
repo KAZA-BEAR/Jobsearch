@@ -18,8 +18,10 @@ import re
 
 LANGUAGE_NAMES = {"en": "English", "de": "German"}
 
-SYSTEM = ("You are a precise CV editor. You follow the output format exactly and never "
-          "add facts that are not in the text you are given.")
+# Sent with every call - extraction, CV bullets, the letter writer and the judge.
+SYSTEM = ("You write and check job-application text for one candidate. Follow the output "
+          "format exactly. Never state anything about the candidate that the facts you are "
+          "given do not say, and never translate names of schools, companies or job titles.")
 
 
 # ------------------------------------------------------------ experience bullets
@@ -92,26 +94,59 @@ def compact_profile(profile: dict) -> str:
     return json.dumps(keep, ensure_ascii=False, separators=(",", ":"))
 
 
-COVER_ONLY = """Write the BODY of a cover letter in {language} for the job below.
+# The rules every model-written sentence about the candidate is held to. The writer,
+# the style pass, the recruiter message and both checkers state the same ones, so
+# no step asks for what a later step deletes (2026-10-04: the letter prompt asked
+# for "transferable skills" and "listed only" requirements, which the clean-up
+# then cut as inference and tool lists).
+CLAIM_RULES = """- State only what the facts say. Never add a skill, tool, task, purpose, result,
+  benefit, number, place or responsibility - not even a likely one ("to improve
+  reliability", "strong skills in", "hands-on experience building").
+- Keep each fact's own verbs and scope: "coordinating with teams" stays "with teams"
+  (not "coordinated teams" or "led"), "1 new feature" stays one, an unfinished degree
+  stays unfinished.
+- One fact per claim: never join two separate facts into one claim (code from one task
+  "for" another task, work at one employer placed at another).
+- RESEARCH INTERESTS are interests only. The candidate may say they are interested in
+  them - never that they studied, used, focus on, or have skills or experience in them.
+- Write school, company and job titles exactly as the facts write them; never translate.
+- Do not say how a fact matches, prepares for or aligns with the job; state the fact."""
 
-Rules:
-- 3 or 4 paragraphs separated by one blank line, 200-300 words in total.
-- Use ONLY the candidate facts below, in your own words. Pick the 2-3 most relevant
-  and explain what the candidate did; do NOT list skills or tools in bulk.
-- Never add a skill, tool, task, result or number that the facts do not state.
-- The candidate does NOT have: {gaps}. Do not claim them. You may say the candidate is
+
+COVER = """Write the BODY of a cover letter in {language} for the job below, as the candidate.
+
+Content:
+- Choose at most FOUR work or project facts - the ones that best match the numbered
+  requirements under JOB (a "proof (work done)" line is such a fact). Say what the
+  candidate did in each, joining related facts into flowing sentences.
+- Say where each fact happened: the job and employer, lab or project written before
+  the colon in the fact ("As an Artificial Intelligence Engineer at SOCO Engineers
+  GmbH, I wrote ..."). Do not paste the facts one after another as a list.
+- A requirement whose proof is "listed only" (a skill or course) may be named in one
+  short sentence. Never list tools or skills in bulk: name at most three tools in
+  the whole letter, each inside a sentence about what the candidate did.
+- The candidate does NOT have: {gaps}. Do not claim them; you may say the candidate is
   keen to learn ONE of them, in one sentence.
-- Never claim a relationship, contact or collaboration with the employer.
-- Write as the candidate, in the first person ("I"). Never address the reader as
-  "you", never write "we" or "our" as if you were the company, and never copy
-  sentences from the job ad.
-- No salutation, no sign-off, no date, no address, no markdown. Plain text only.
+- Never write a sentence that only restates a job requirement ("C++ is required for
+  this role"), and never claim contact or collaboration with the employer.
 
-Structure: (1) the role and why it fits the candidate's studies; (2) the most relevant
-evidence: take the 2-3 most important numbered requirements under JOB whose proof is
-"work done" and, for each, describe what the candidate did in that line; (3) the
-"listed only" requirements, named briefly, plus transferable skills, stated honestly;
-(4) optional short close.
+Rules for every sentence about the candidate:
+{claims}
+
+Form: 3 or 4 paragraphs separated by one blank line, 180-280 words. (1) the role and
+the candidate's current studies; (2) and (3) the chosen facts; (4) optional: one
+"keen to learn" sentence. First person ("I"); never address the reader as "you" or
+write "we"/"our" as the company; never copy sentences from the job ad. No salutation,
+sign-off, date, address or markdown.
+
+Citations - required:
+- Every fact below has an ID (F1, F2, ... and I1 for research interests). End EVERY
+  sentence with the IDs of the facts it uses, in square brackets: "... computation
+  engine [F9]." or "... [F3, F9]." The "proof" lines under JOB are copies of these
+  facts: cite the matching ID.
+- A sentence about the job, the company or the candidate's motivation that states
+  nothing the candidate did or has ends with [J].
+- A sentence may say only what its cited facts say.
 
 {style}
 
@@ -121,29 +156,34 @@ JOB:
 CANDIDATE FACTS (the only things you may state about the candidate):
 {profile}
 
-Output only the cover letter body."""
+Output only the cover letter body, with the citations."""
 
 # "exact title ... never translated": Qwen3-4B translated the BMW title's
 # "Flussregelung" (flux control) as "river regulation".
 RECRUITER_ONLY = """Write a short message in {language} from the candidate to a recruiter
 about the job below, as JSON with three fields, each ONE sentence:
-- "intro": in the first person ("I am ..."), who the candidate is and which role
-  they are writing about - name the role with its exact title from the job, copied
-  as written and never translated,
-- "evidence": one concrete thing from the profile that fits the role (if the job
-  lists numbered requirements with proof lines, use the proof of requirement 1),
-- "question": a low-pressure question the candidate asks about the role, team or
-  research, ending with a question mark. Never ask the recipient about their own
-  preferences or whether THEY want to apply or start - they are hiring, not applying.
-Only facts from the profile. Never claim a relationship, prior contact or interest in
-the employer's past work. No greeting ("Dear ...") and no thanks or signature.{recruiter_line}
+- "intro": in the first person ("I am ..."), who the candidate is and which role they
+  are writing about - the role's exact title from the job, copied as written,
+- "evidence": ONE piece of work that fits the role - a job or project fact (a line
+  with a job title and employer, or "Project:"), never an education, coursework,
+  skills or language line - said in the fact's own words with "I" and naming where
+  it happened. Only the fact - do not add that it matches, demonstrates or relates
+  to a requirement,
+- "question": a low-pressure question about the role, team or research, ending with
+  a question mark. Never ask the recipient about their own preferences or whether
+  THEY want to apply - they are hiring, not applying.
+Never claim a relationship, prior contact or interest in the employer's past work. No
+greeting ("Dear ..."), no thanks or signature.{recruiter_line}
+
+Rules for every sentence about the candidate:
+{claims}
 
 {style}
 
 JOB:
 {jd}
 
-CANDIDATE PROFILE (JSON):
+CANDIDATE FACTS (the only things you may state about the candidate):
 {profile}
 
 Output only the JSON."""
@@ -186,23 +226,27 @@ def join_recruiter(raw: str) -> str:
 
 
 def cover_only_prompt(profile: dict, job: str, lang: str, gaps: str,
-                      facts: str = "") -> str:
-    """`facts`: the profile lines that prove the job's requirements. Giving the
-    model only these (plus studies) instead of the whole profile keeps the letter
-    on relevant, true material."""
-    return COVER_ONLY.format(language=LANGUAGE_NAMES.get(lang, "English"),
-                             gaps=gaps or "none listed", jd=job, style=STYLE,
-                             profile=facts or compact_profile(profile))
+                      facts: str = "", cited: bool = True) -> str:
+    """The letter prompt. `facts`: the numbered fact list ("F7: ...", "I1: ...") from
+    the pipeline; every sentence must cite the IDs it uses, so it can be checked
+    against those facts alone. `cited` is kept for older callers; the prompt always
+    asks for citations, which the pipeline strips before anything is shown."""
+    return COVER.format(language=LANGUAGE_NAMES.get(lang, "English"),
+                        gaps=gaps or "none listed", jd=job, style=STYLE,
+                        claims=CLAIM_RULES, profile=facts or compact_profile(profile))
 
 
-# One rewrite for style only, applied to a letter that already passed the fact-check;
-# the result is fact-checked again and dropped if anything in it is unsupported.
+# One rewrite for style only, applied to a letter that already passed the checks;
+# the result is checked again and dropped if anything in it is unsupported.
 STYLE_FIX = """Revise this cover letter body. Fix ONLY these writing problems:
 {problems}{predictable}
 
-Keep every fact exactly as stated: do not add, remove or change any skill, tool, task,
-result, number, employer, degree or place. Do not add new claims. Keep the same
-paragraphs. Change wording, sentence length and sentence order only.
+Change wording, sentence length and sentence order only. Keep every fact exactly as it
+is stated and keep the same paragraphs. Do not add a sentence, a claim, a tool list or
+a sentence that restates a job requirement, and do not remove a fact.
+
+Rules that still apply to every sentence about the candidate:
+{claims}
 
 {style}
 
@@ -218,22 +262,25 @@ def style_fix_prompt(text: str, problems: list, predictable: list = ()) -> str:
         pred = ("\n- rephrase these sentences, which read as too predictable:\n"
                 + "\n".join(f"  {s}" for s in predictable))
     return STYLE_FIX.format(problems="\n".join(f"- {p}" for p in problems), predictable=pred,
-                            style=STYLE, text=text)
+                            claims=CLAIM_RULES, style=STYLE, text=text)
 
 
 # ------------------------------------------------------- fact-check (judge)
 
 FACTCHECK = """Below are the ONLY true facts about a candidate, and a text written for them.
-List every sentence of the text that states something about the candidate which the facts
-do NOT support (a skill, tool, task, result, number, experience or connection that is not
-in the facts). Copy each such sentence exactly. General enthusiasm, questions and
-"keen to learn" sentences are fine - do not list those.
-Also fine, do not list: sentences that restate a fact and say how it relates to the job
-("this is relevant to the role", "which relates to developing ROS 2 nodes"), and
-sentences saying which role the candidate is writing about. Judge only what the
-sentence says the candidate DID or HAS: list it if that part is not in the facts.
-A sentence that adds a new skill, tool, task or result to a true fact must still be
-listed ("I built the manipulator, which involved navigation algorithms").
+List every sentence of the text that states something about the candidate which the
+facts do NOT support. Copy each such sentence exactly. List a sentence when it:
+- adds a skill, tool, task, purpose, result, benefit, number, place or responsibility
+  the facts do not state - also when the rest of the sentence is true
+  ("I built the manipulator, which involved navigation algorithms");
+- presents a research interest as coursework, a focus of study, a skill or experience;
+- joins two separate facts into one claim (work from one task or employer described as
+  part of another);
+- makes a fact bigger: "led" or "coordinated teams" for "coordinating with teams",
+  plural for one item, a finished degree for an unfinished one.
+Do NOT list: enthusiasm, questions, "keen to learn" sentences, sentences naming the role
+applied for, or sentences that only describe the job; and do not list a sentence that
+says the same as a fact in other words.
 "reason": at most 15 words, naming the unsupported part.
 
 FACTS:
@@ -258,12 +305,50 @@ def factcheck_prompt(facts: str, text: str) -> str:
     return FACTCHECK.format(facts=facts, text=text)
 
 
+# One sentence against the few facts it cites or draws on: a decomposed entailment
+# check (claim-level, as grounding checkers like MiniCheck do) instead of judging the
+# whole letter against the whole profile, where the 4B judge cut true sentences.
+ENTAIL = """Do these facts about a job candidate support the sentence below?
+
+Facts:
+{facts}
+
+Sentence: {sentence}
+
+SUPPORTED: the sentence says what the facts say, in any wording, word order or tense,
+or names the same thing more generally ("the computation engine" for "a computation
+engine"). Opinions about the job and enthusiasm ("I am eager to ...") are supported.
+
+NOT supported - answer false - if the sentence:
+- adds anything the facts do not state: a tool, skill, task, purpose ("to improve
+  ..."), result, benefit, number, place or responsibility ("led", "coordinated teams"
+  for "coordinating with teams");
+- calls a research interest coursework, a focus, a skill or experience;
+- joins two separate facts into one claim that neither fact states (one task done
+  "for", "while" or "as part of" another).
+
+Answer with JSON: "supported" true or false, and "added": the words the facts do not
+back (empty when supported)."""
+
+ENTAIL_SCHEMA = {
+    "type": "object", "required": ["supported", "added"],
+    "properties": {"supported": {"type": "boolean"},
+                   "added": {"type": "string", "maxLength": 160}},
+}
+
+
+def entail_prompt(facts: list, sentence: str) -> str:
+    return ENTAIL.format(facts="\n".join(f"- {f}" for f in facts), sentence=sentence)
+
+
 def recruiter_only_prompt(profile: dict, job: str, lang: str,
-                          recruiter: str = "") -> str:
+                          recruiter: str = "", facts: str = "") -> str:
+    """`facts`: the same fact list the letter gets (research interests on their own
+    line). Without it, the whole profile as JSON, as before."""
     return RECRUITER_ONLY.format(
         language=LANGUAGE_NAMES.get(lang, "English"),
         recruiter_line=f" Address it to {recruiter}." if recruiter else "",
-        jd=job, style=STYLE, profile=compact_profile(profile))
+        claims=CLAIM_RULES, jd=job, style=STYLE, profile=facts or compact_profile(profile))
 
 
 # ----------------------------------------------------- stage 2: job requirements

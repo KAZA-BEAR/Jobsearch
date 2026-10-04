@@ -1042,6 +1042,7 @@ def claimed_gaps(text: str, forbidden) -> list:
 
 # ------------------------------------------------------------ attribution check
 
+_LEGAL_FORMS = set("gmbh ag se kg ug inc ltd llc plc bv nv sa sas srl spa ab oy as co corp".split())
 _ORG_NOISE = set("""robotics engineers engineer engineering gmbh club team study case institute
 university national technische hochschule sciences technologies technology school college lab""".split())
 # Words too common across jobs to prove which organisation a sentence is about.
@@ -1073,7 +1074,11 @@ def _org_groups(profile: dict) -> list:
     for p in profile.get("projects") or []:
         raw.append((p.get("context", ""), " ".join([p.get("name", "")] + (p.get("bullets") or []))))
     for ed in profile.get("education") or []:
+        # Research interests are this school's topics too: without them "digital
+        # twins" at TH Deggendorf counted as FAST's work ("Digital Integrated
+        # Circuits") and a true sentence was cut as misattributed (2026-10-03).
         raw.append((ed.get("institution", ""), " ".join((ed.get("coursework") or []) +
+                                                       (ed.get("research_interests") or []) +
                                                        [ed.get("thesis", "")])))
     groups = []
     for org, work in raw:
@@ -1081,7 +1086,10 @@ def _org_groups(profile: dict) -> list:
         if not toks:
             continue
         # the organisation's own name counts as its work ("Robotics Lab" -> robotics)
-        words = _signature(work) | ({w.lower() for w in _WORD.findall(org)} - _COMMON_WORK - _STOP)
+        # legal forms are nobody's work: "GmbH" made "... at Robert Bosch GmbH" read
+        # as SOCO Engineers GmbH's work (2026-10-04)
+        words = _signature(work) | ({w.lower() for w in _WORD.findall(org)}
+                                    - _COMMON_WORK - _STOP - _LEGAL_FORMS)
         for g in groups:
             if g[0] & toks:
                 g[0].update(toks)
@@ -1098,6 +1106,38 @@ def _org_groups(profile: dict) -> list:
     return groups
 
 
+def _degree_orgs(profile: dict, sentence: str) -> set:
+    """Organisation tokens of the degrees a sentence names: "my B.Sc in Electrical
+    Engineering" names GIK even without the school's name. Without this, "I completed
+    a B.Sc ... Signal & Image Processing, and I currently pursue an M.Eng ... at
+    Technische Hochschule Deggendorf" was cut for putting GIK's courses under THD
+    (Ubica, 2026-10-03). "Master's" names every master's degree in the profile."""
+    toks: set = set()
+    for ed in profile.get("education") or []:
+        m = re.match(r"\s*([BM])\.?\s?(Sc|Eng|A|Tech)\b", ed.get("degree", ""), re.I)
+        if not m:
+            continue
+        level, kind = m.group(1).upper(), m.group(2)
+        pats = [rf"\b{level}\.?\s?{re.escape(kind)}\b",
+                # whole words only: "Masterarbeit" in a Bosch job title named both
+                # master's schools and the opening sentence was cut (2026-10-04)
+                r"\bbachelor(?:'?s)?\b" if level == "B" else r"\bmaster(?:'?s)?\b"]
+        if any(re.search(p, sentence, re.I) for p in pats):
+            toks |= _org_tokens(ed.get("institution", ""))
+    return toks
+
+
+_JOB_TITLE_CLAUSE = re.compile(
+    r"\b(applying|apply|application|writing|interest(?:ed)?)\s+(for|about|in)\s+.*?"
+    r"(?=\s+at\s+[A-Z]|\s+(?:role|position|opening|vacancy)\b|[.!?]?$)", re.I)
+
+
+def _without_job_title(sentence: str) -> str:
+    """"I am applying for the <job title> at Fraunhofer." -> "I am applying for at
+    Fraunhofer." (a run-on sentence keeps everything after the employer)."""
+    return _JOB_TITLE_CLAUSE.sub(r"\1 \2", sentence, count=1)
+
+
 def misattributions(text: str, profile: dict) -> list:
     """Sentences that name one organisation but describe another's work, e.g.
     'At TH Deggendorf I built a UAV for traffic observation' (that project was
@@ -1105,8 +1145,14 @@ def misattributions(text: str, profile: dict) -> list:
     groups = _org_groups(profile)
     out = []
     for sentence in re.split(r"(?<=[.!?])\s+", text or ""):
-        words = {w.lower() for w in _WORD.findall(sentence)}
-        words |= {a.lower() for a in re.findall(r"\b[A-Z]{3,}\b", sentence)}
+        # The job title is the employer's words, not a claim: "applying for the
+        # Master Thesis - Reinforcement Learning for wheeled, bipedal robots at
+        # Fraunhofer" was cut as the robotics club's work (Fraunhofer, Magazino
+        # 2026-10-04).
+        own = _without_job_title(sentence)
+        words = {w.lower() for w in _WORD.findall(own)}
+        words |= {a.lower() for a in re.findall(r"\b[A-Z]{3,}\b", own)}
+        words |= _degree_orgs(profile, own)
         named = [i for i, (toks, _w) in enumerate(groups) if toks & words]
         if not named:
             continue
@@ -1122,8 +1168,13 @@ def misattributions(text: str, profile: dict) -> list:
 
 
 # "coursework in X", or "my master's program gave me a foundation in X"
-_TAUGHT = re.compile(r"\b(coursework|courses?|modules?|lectures?)\b|\b(program(me)?|studies|degree)\b"
-                     r".{0,60}\b(foundation|taught|covered|trained|training|provided)\b", re.I)
+# Present tense too: "My current program at Technische Hochschule Deggendorf covers
+# autonomous systems, computer vision, and digital twins" passed (DLR and ZEISS,
+# 2026-10-03) - the last two are research interests.
+_TAUGHT = re.compile(r"\b(coursework|courses?|modules?|lectures?)\b|\b(program(me)?|studies|degree|"
+                     r"m\.?\s?eng|m\.?\s?sc|b\.?\s?sc|master'?s|bachelor'?s)\b"
+                     r".{0,60}\b(foundation|taught|teaches|covered|covers|covering|trained|"
+                     r"training|provided|includes?|included|spans?)\b", re.I)
 
 
 def _names_interest(interest: str, sentence: str) -> bool:
@@ -1132,7 +1183,9 @@ def _names_interest(interest: str, sentence: str) -> bool:
     Autonomous Systems and Motion Planning" through)."""
     words = [w for w in re.findall(r"[A-Za-z0-9+-]+", interest)
              if len(w) >= 3 and w.lower() != "and"]
-    said = [w for w in words if re.search(rf"\b{re.escape(w)}\b", sentence, re.I)]
+    # plural too: "coursework covers autonomous systems and digital twins" passed for
+    # the interest "Digital Twin" (NVIDIA, 2026-10-04)
+    said = [w for w in words if re.search(rf"\b{re.escape(w)}(?:s|es)?\b", sentence, re.I)]
     return len(said) >= min(2, len(words))
 
 
@@ -1163,7 +1216,13 @@ solutions solution tasks task methods approach approaches complex various differ
 teams team roles role studies program programme master's bachelor's degree
 involved involving involves include includes included including allowed enabled provided
 gave given focused focusing helped required requires gained learned learnt worked
-including alongside during toward towards capacity""".split())
+including alongside during toward towards capacity
+covers cover covered covering connect connects connected connecting span spans spanned
+spanning comprise comprises comprised comprising consist consists consisted handled
+handling working""".split())
+# ^ Framing verbs a paraphrase adds: "My coursework covers Autonomous Systems, ..." and
+#   "... protocols to connect systems" restate the profile but were cut as "adds covers",
+#   "adds connect" (DLR, 2026-10-03).
 # Evaluative and connecting words: they judge or link a fact but add no skill, tool
 # or result. Flagging them deleted true sentences over "further", "solid",
 # "supports", "enthusiasm", "listed" (a qwen3-8b letter went from 3 paragraphs to 59
@@ -1208,11 +1267,32 @@ def _stem6(word: str) -> str:
     return w[:6]
 
 
-def invented_details(text: str, profile: dict) -> list:
+_AREA_CLAIM = re.compile(
+    r"^\s*(?P<topic>[^.,;]{3,80}?)\s+(?:is|are|was|were)\s+(?:also\s+)?(?:another|an?|one)?\s*"
+    r"(?:\w+\s+){0,2}(?:area|field|topic|domain|skill|discipline)s?\s+(?:where|in which)\s+I\b",
+    re.I)
+
+
+def _known_form(word: str, stems: set) -> bool:
+    """The word, or its base form, is in the profile: "creating" for "create",
+    "studied" for "study" ("adds creating" cut a true robot-platform sentence,
+    ZEISS 2026-10-03; _stem6 keeps 6 letters, so "creati" never met "create")."""
+    w = word.lower()
+    forms = {w}
+    for suffix, repl in (("ing", ""), ("ing", "e"), ("ied", "y"), ("ed", ""), ("ed", "e"),
+                         ("ies", "y")):
+        if w.endswith(suffix) and len(w) - len(suffix) >= 3:
+            forms.add(w[:-len(suffix)] + repl)
+    return any(_stem6(f) in stems for f in forms)
+
+
+def invented_details(text: str, profile: dict, allowed: str = "") -> list:
     """(sentence, why) for sentences that attach something to the candidate's own
     work that the profile never mentions: 'exposure to ... real-time data
     processing', 'test cases that enhanced system reliability'."""
-    stems = _profile_stems(profile)
+    # `allowed`: the employer and role being applied to - "Ubica Robotics' scan robot
+    # features" was cut as "adds ubica" (2026-10-03).
+    stems = _profile_stems(profile) | {_stem6(w) for w in _WORD.findall(allowed or "")}
     out = []
     for original in re.split(r"(?<=[.!?])\s+", text or ""):
         sentence = _aliases(original)
@@ -1227,7 +1307,17 @@ def invented_details(text: str, profile: dict) -> list:
             window = _TO_JOB.split(window, maxsplit=1)[0]
             window = _SELF_ASSESS.split(window, maxsplit=1)[0]
             unknown |= {w.lower() for w in _WORD.findall(window)
-                        if len(w) >= 5 and _stem6(w) not in stems
+                        if len(w) >= 5 and not _known_form(w, stems)
+                        and w.lower() not in _STOP and w.lower() not in _VERBS
+                        and w.lower() not in _PLAIN and w.lower() not in _SOFT
+                        and not w.lower().endswith("ly")}
+        # The claim before the "I": "Physics simulation is another critical area where
+        # I have gained hands-on experience" (NVIDIA, 2026-10-03) - the claim window
+        # after "experience" was empty, so nothing was checked.
+        area = _AREA_CLAIM.search(sentence)
+        if area:
+            unknown |= {w.lower() for w in _WORD.findall(area.group("topic"))
+                        if len(w) >= 5 and not _known_form(w, stems)
                         and w.lower() not in _STOP and w.lower() not in _VERBS
                         and w.lower() not in _PLAIN and w.lower() not in _SOFT
                         and not w.lower().endswith("ly")}
@@ -1502,6 +1592,17 @@ def interest_claims(text: str, profile: dict) -> list:
         part = _claim_part(sentence)
         if re.search(r"\binterest", part, re.I) or sentence.rstrip().endswith("?"):
             continue
+        # The interest before the claim word: "I can demonstrate strong motion planning
+        # skills through my work ..." (ZEISS, 2026-10-04); _EXPERTISE reads only
+        # what follows "expertise in", "experience with".
+        before = [r for r, forms in interests
+                  if any(re.search(rf"\b{re.escape(f)}s?\s+(skills?|knowledge|abilit\w*|competenc\w*|"
+                                   rf"expertise|experience|capabilit\w*)\b", part, re.I)
+                         for f in forms)]
+        if before:
+            out.append((sentence.strip(), f"presents {', '.join(before)} as a skill; in your "
+                                          "profile it is only a research interest"))
+            continue
         m = _EXPERTISE.search(part)
         if not m:
             continue
@@ -1567,6 +1668,88 @@ def merged_claims(text: str, profile: dict) -> list:
                                           f"\"{bullets[a][1][:60]}\" - separate items in your profile"))
         previous = sentence
     return out
+
+
+# _CLAUSES plus "and" before an irregular past tense: "I automated workflows in ANSYS
+# and wrote C++/Python code" states two bullets as two facts.
+def _fact_clauses() -> re.Pattern:
+    # Built on first use: _CLAUSES is defined further down this module.
+    global _FACT_CLAUSES_RX
+    if _FACT_CLAUSES_RX is None:
+        _FACT_CLAUSES_RX = re.compile(_CLAUSES.pattern + r"|,?\s+and\s+(?=(?:"
+                                      + "|".join(sorted(_IRREGULAR)) + r")\b)", re.I)
+    return _FACT_CLAUSES_RX
+
+
+_FACT_CLAUSES_RX = None
+
+
+def blended_bullets(text: str, profile: dict) -> list:
+    """(sentence, why) for a clause that fuses two separate bullets into one claim:
+    "I have written C++ and Python code for automation workflows" - the code was for
+    the computation engine, the workflows were ANSYS (two SOCO bullets; NVIDIA,
+    2026-10-03). mixed_details compares whole jobs and projects, and merged_claims
+    needs a "this project required" link, so same-employer blends went through.
+
+    A word counts for a bullet only when no other bullet has it and it is not a
+    listed skill ("Python" is in the skills, so it proves nothing on its own).
+    Two facts in two clauses ("..., and I also wrote ...") are fine."""
+    # Same employer or project only: across employers, misattributions and
+    # mixed_details already apply, and comparing every bullet with every other
+    # flagged 47 of 200 sentences in today's letters, nearly all true.
+    # Jobs only: a job's bullets are separate tasks, a project's bullets one piece of
+    # work - "an autonomous UAV ..., which reduced delays by 30%" joins the UAV and
+    # its own result, and was cut (NVIDIA, 2026-10-03).
+    groups = [e.get("bullets") or [] for e in profile.get("experience") or []]
+    # Single-word skills only: "VS Code" made "code" a skill and hid the code bullet.
+    skills = {_stem6(v) for vs in (profile.get("skills") or {}).values() for v in vs
+              if len(v.split()) == 1 and len(v) >= 4}
+
+    def stems(t: str) -> set:
+        # Verbs kept, unlike _content_stems: "Automated workflows" is the ANSYS bullet's
+        # own word, and "automation workflows" must be matched to it.
+        return {_stem6(w) for w in _WORD.findall(_aliases(t))
+                if len(w) >= 4 and w.lower() not in _STOP and w.lower() not in _PLAIN
+                and w.lower() not in _FILLER and w.lower() not in _SOFT
+                and not w.lower().endswith("ly")}
+
+    # Not _COMMON_WORK: it was made to tell employers apart and holds "documentation"
+    # and "variables", which left the XML bullet with no words of its own (the
+    # XML-documentation + ANSYS blend passed, Fraunhofer 2026-10-04).
+    generic = {_stem6(w) for w in _PLAIN} | {
+        _stem6(w) for w in """autonomous development developed testing tested validation
+        design designed different across teams team robot robots robotics engineering
+        create created creating performance software hardware built build building
+        wrote write written writing used using worked working""".split()}
+    units = []                      # (bullet, its words no sibling bullet has)
+    for bullets in groups:
+        sets = [stems(b) - skills - generic for b in bullets]
+        for i, b in enumerate(bullets):
+            others = set().union(*(o for j, o in enumerate(sets) if j != i))
+            units.append((b, sets[i] - others))
+    out = []
+    for sentence in re.split(r"(?<=[.!?])\s+", text or ""):
+        if _LEARNING.search(sentence) or sentence.rstrip().endswith("?"):
+            continue
+        # "while working with ANSYS ..." is the setting of the claim, not a second fact:
+        # "I created XML documentation ... while working with ANSYS CAD design and
+        # simulation" fused two SOCO bullets (Fraunhofer, 2026-10-04). "while I ..."
+        # still separates.
+        joined = re.sub(r",?\s+while\s+(?=[a-z]+ing\b)", " ", _aliases(sentence), flags=re.I)
+        for clause in _fact_clauses().split(joined):
+            own = stems(clause or "")
+            hits = sorted(((len(own & u), b) for b, u in units if own & u), reverse=True)
+            # one bullet clearly (2+ of its own words), and some of a sibling's
+            if len(hits) >= 2 and hits[0][0] >= 2 and _siblings(groups, hits[0][1], hits[1][1]):
+                out.append((sentence.strip(),
+                            f"fuses two separate items into one claim: \"{hits[0][1][:55]}\" "
+                            f"and \"{hits[1][1][:55]}\""))
+                break
+    return out
+
+
+def _siblings(groups: list, a: str, b: str) -> bool:
+    return any(a in g and b in g for g in groups)
 
 
 def mixed_details(text: str, profile: dict) -> list:

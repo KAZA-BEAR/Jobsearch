@@ -205,9 +205,13 @@ def evidence_units(profile: dict) -> list:
     for cat, items in (profile.get("skills") or {}).items():
         units.append((f"Skills: {cat}", ", ".join(items)))
     for ed in profile.get("education") or []:
-        extra = (ed.get("coursework") or []) + (ed.get("research_interests") or [])
-        if extra:
-            units.append((f"Education: {ed['degree']}", ", ".join(extra)))
+        # Courses only, as in ats_embed: a research interest is not proof. On this
+        # line it made SLAM a "have", and the letter built from the profile said
+        # "My M.Eng coursework included ... SLAM ... Computer Vision ... Digital
+        # Twin" - all four only research interests (NVIDIA, 2026-10-03).
+        courses = ed.get("coursework") or []
+        if courses:
+            units.append((f"Education: {ed['degree']}", ", ".join(courses)))
         if ed.get("thesis"):
             units.append((f"Thesis: {ed['degree']}", ed["thesis"]))
     return units
@@ -299,6 +303,19 @@ def analyse_gaps(profile: dict, requirements: list, call, log,
                                                  f"{label} {line}", re.I) for w in leftover)]
         if literal:
             lines, leftover = literal + lines, []
+        # A job or project bullet naming every word of the skill is better proof than
+        # a skills list: "PCB design" was proven by "Skills: PCB troubleshooting ..."
+        # while "designed and manufactured 2-layer PCBs" went unused, and the letter
+        # for a PCB job never mentioned it (Fraunhofer, 2026-10-04).
+        if lines:
+            # short words too ("PCB"), which checks._WORD skips
+            words = [w.lower() for w in re.findall(r"[A-Za-z][A-Za-z0-9+#]+", skill)
+                     if w.lower() not in checks._STOP and w.lower() not in _GENERIC]
+            done = [f"{label}: {line}" for label, line in units
+                    if words and not label.startswith(("Skills:", "Education:"))
+                    and all(re.search(rf"\b{re.escape(w[:max(5, len(w) - 2)])}", line, re.I)
+                            for w in words)]
+            lines = done + [l for l in lines if l not in done]
         if not terms and not leftover:
             # Only generic words ("programming knowledge"): too vague to call a gap -
             # calling it one once made a letter say "I do not have programming
