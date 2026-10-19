@@ -31,6 +31,7 @@ from linkedin_jobs import (Store, Job, STATUSES, age_hours, data_dir, parse_post
                            apply_saved_api_keys, outputs_dir,
                            load_settings, settings_path)
 from eu_student_jobs import (MARKETS, KINDS, EuresProvider, classify, is_student_suitable,
+                             matches_field,
                              ADZUNA_EUROPE, ADZUNA_EU_DEFAULTS, keep_adzuna_europe)
 from ats_pipeline import (
     DEFAULT_BACKEND, DEFAULT_BASE_URL, DEFAULT_LOCAL_MODELS, DEFAULT_WRITER,
@@ -40,6 +41,7 @@ from ats_regions import DEFAULT_REGION, REGIONS as ATS_REGIONS
 from company_radar import (
     FormDScanner,
     BoardProber,
+    company_base_key,
     RadarStore,
     emerging_employers,
     FUNDING_KEYWORDS,
@@ -456,7 +458,7 @@ class App(tk.Tk):
                      ("Workday companies", "_panel_workday"))),
         ("Europe", (("Internships & Werkstudent (EURES)", "_panel_student"),
                     ("Adzuna Europe", "_panel_adzuna_eu"), ("LinkedIn / Indeed", "_panel_jobspy"))),
-        ("PhD & research", (("PhD positions (EURAXESS)", "_panel_phd"),
+        ("PhD & research", (("PhD positions (EURES)", "_panel_phd"),
                             ("Research & new employers", "_panel_research"),
                             ("Graduate employer boards", "_panel_grad"))),
         ("US & Asia", (("USAJOBS", "_panel_usajobs"), ("Adzuna US / Asia", "_panel_adzuna"),
@@ -627,7 +629,7 @@ class App(tk.Tk):
                                                 codes=list(PHD_TERMS),
                                                 preset={"DE", "NL", "SE", "CH"})
 
-        ttk.Button(f, text="Search EURAXESS", style="Run.TButton",
+        ttk.Button(f, text="Search PhD positions", style="Run.TButton",
                    command=self.run_phd).grid(row=3, column=1, sticky="w", pady=(12, 0))
 
     # ---------------- tab: graduate ----------------
@@ -669,7 +671,7 @@ class App(tk.Tk):
         ttk.Checkbutton(f, text="If a board is dead/empty, search LinkedIn/Indeed for that company",
                         variable=self.grad_jobspy_fallback).grid(
             row=3, column=1, columnspan=3, sticky="w", pady=(2, 0))
-        ttk.Label(f, foreground="#666",
+        ttk.Label(f, foreground=self.MUTED,
                   text="Nothing selected = search every employer shown.").grid(
             row=1, column=4, sticky="nw", padx=12, pady=(8, 0))
 
@@ -774,7 +776,7 @@ class App(tk.Tk):
         ttk.Checkbutton(f, text="Part-time only (typical for Werkstudent)",
                         variable=self.ba_part_time).grid(row=2, column=1, columnspan=3,
                                                          sticky="w", pady=4)
-        ttk.Label(f, foreground="#555", wraplength=720, justify="left",
+        ttk.Label(f, foreground=self.MUTED, wraplength=720, justify="left",
                   text="Germany's largest job database (Bundesagentur für Arbeit). Leave 'Near' "
                        "empty for nationwide. 'Posted within days' = 1 gives the last 24 hours. "
                        "Full descriptions are fetched for the first hits (40 by default) so the "
@@ -838,7 +840,7 @@ class App(tk.Tk):
         self.personio_names.grid(row=2, column=1, sticky="w", pady=(4, 0))
         ttk.Button(f, text="Find slugs", command=self.run_personio_probe).grid(
             row=2, column=2, sticky="w", padx=6, pady=(4, 0))
-        ttk.Label(f, foreground="#555", wraplength=720, justify="left",
+        ttk.Label(f, foreground=self.MUTED, wraplength=720, justify="left",
                   text="Many German startups and Mittelstand firms recruit via Personio. Find the "
                        "slug in a company's careers link (xyz.jobs.personio.de → xyz) and add it, "
                        "comma-separated, or type company names under 'Find by name' and the app "
@@ -948,7 +950,7 @@ class App(tk.Tk):
         ttk.Checkbutton(f, text="Only student / internship / thesis / graduate titles",
                         variable=self.adzeu_strict).grid(row=4, column=1, columnspan=3,
                                                          sticky="w", pady=4)
-        ttk.Label(f, foreground="#555", wraplength=720, justify="left",
+        ttk.Label(f, foreground=self.MUTED, wraplength=720, justify="left",
                   text="Adzuna collects jobs from many sites across Europe. It matches whole "
                        "words: a job must contain the role word and at least one field word. "
                        "Picking a country fills both in that country's language. Leave 'Near' "
@@ -1014,9 +1016,10 @@ class App(tk.Tk):
         self.wd_country = ttk.Entry(f, width=16)
         self.wd_country.insert(0, "Germany")
         self.wd_country.grid(row=0, column=3, sticky="w", padx=6)
-        # Beside the employer list, not a fifth column: that ran off the narrower panel.
+        # Under the "Employers" label, in the first column: a fifth column ran off the
+        # panel's right edge at the default window width (2026-10-12).
         cap = ttk.Frame(f)
-        cap.grid(row=1, column=4, sticky="nw", padx=(18, 0), pady=(8, 0))
+        cap.grid(row=1, column=0, sticky="sw", pady=(8, 4))
         ttk.Label(cap, text="Max per employer").pack(anchor="w")
         self.wd_max = tk.IntVar(value=100)
         ttk.Spinbox(cap, from_=10, to=500, increment=10, textvariable=self.wd_max,
@@ -1037,7 +1040,7 @@ class App(tk.Tk):
         ttk.Label(f, text="Add careers URL").grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.wd_url = ttk.Entry(f, width=60)
         self.wd_url.grid(row=2, column=1, columnspan=3, sticky="w", padx=6, pady=(8, 0))
-        ttk.Label(f, foreground="#555", wraplength=720, justify="left",
+        ttk.Label(f, foreground=self.MUTED, wraplength=720, justify="left",
                   text="Big manufacturers (ZEISS, Airbus, ASML, NXP…) recruit on Workday. To add "
                        "another, open its careers page and paste any link containing "
                        "'myworkdayjobs.com'. Nothing selected = all employers.").grid(
@@ -1331,11 +1334,17 @@ class App(tk.Tk):
             if val and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", val):
                 messagebox.showerror("Bad date", f"{label} must look like 2026-09-30.")
                 return
-        if self.tr_status.get() and self.tr_status.get() != job.status:
-            self.store.set_status(job.job_id, self.tr_status.get())
+        new_status = self.tr_status.get()
+        stamped = new_status == "applied" and new_status != job.status
+        if new_status and new_status != job.status:
+            self.store.set_status(job.job_id, new_status)
+        applied, follow = self.tr_applied.get().strip(), self.tr_follow.get().strip()
+        # Changing the status to "applied" stamps today and a follow-up 7 days out;
+        # empty date fields then mean "use those", not "clear them" - they overwrote
+        # the stamped dates with "" (2026-10-12). Otherwise an empty field clears.
         self.store.set_tracking(job.job_id, notes=self.tr_notes.get().strip(),
-                                applied_at=self.tr_applied.get().strip(),
-                                follow_up=self.tr_follow.get().strip())
+                                applied_at=None if stamped and not applied else applied,
+                                follow_up=None if stamped and not follow else follow)
         r = self.store.get(job.job_id)
         if r is not None and job.job_id in self.rows:
             self.rows[job.job_id] = Job.from_row(r)
@@ -1684,7 +1693,7 @@ class App(tk.Tk):
         ttk.Spinbox(f, from_=0, to=720, increment=24, textvariable=self.jobspy_hours,
                     width=5).grid(row=3, column=3, sticky="w", padx=6, pady=(8, 0))
 
-        hint = ttk.Label(f, foreground="#666", wraplength=680, justify="left",
+        hint = ttk.Label(f, foreground=self.MUTED, wraplength=680, justify="left",
                          text="Searches LinkedIn / Indeed / Glassdoor / ZipRecruiter by keyword "
                               "and location, in any country. Use it when an employer has no public "
                               "board of its own. Needs python-jobspy installed (see the install "
@@ -1776,7 +1785,7 @@ class App(tk.Tk):
         ttk.Checkbutton(f, text="All pay grades (default: GS 05-12, where graduate roles sit)",
                         variable=self.usa_all_grades).grid(row=1, column=2, columnspan=2,
                                                            sticky="w", padx=(18, 0))
-        ttk.Label(f, foreground="#555", wraplength=720, justify="left",
+        ttk.Label(f, foreground=self.MUTED, wraplength=720, justify="left",
                   text="US federal jobs from the official USAJOBS API. Needs a free key and the "
                        "email you registered it with (Settings → API keys). Most federal "
                        "robotics work (NASA, Navy labs, DoE) is ITAR-restricted to US citizens "
@@ -1834,7 +1843,7 @@ class App(tk.Tk):
         ttk.Checkbutton(f, text="Only explicit graduate / junior / entry-level roles",
                         variable=self.adz_strict).grid(row=2, column=1, columnspan=3,
                                                        sticky="w", pady=4)
-        ttk.Label(f, foreground="#555", wraplength=720, justify="left",
+        ttk.Label(f, foreground=self.MUTED, wraplength=720, justify="left",
                   text="Job aggregator covering the US, India, Singapore, Australia and New "
                        "Zealand. Needs a free app ID and key (Settings → API keys).").grid(
             row=3, column=0, columnspan=4, sticky="w", pady=(6, 0))
@@ -1878,7 +1887,7 @@ class App(tk.Tk):
         ttk.Checkbutton(f, text="Only explicit graduate / junior / entry-level roles",
                         variable=self.mcf_strict).grid(row=1, column=1, columnspan=3,
                                                        sticky="w", pady=4)
-        ttk.Label(f, foreground="#555", wraplength=720, justify="left",
+        ttk.Label(f, foreground=self.MUTED, wraplength=720, justify="left",
                   text="Singapore's national job portal. No key needed, and every listing "
                        "shows a salary range. Its search service is unofficial and has moved "
                        "before, so if it stops answering, the activity log says which "
@@ -1910,7 +1919,7 @@ class App(tk.Tk):
         text.pack(side="left", fill="both", expand=True)
         sb.pack(side="left", fill="y")
         text.tag_configure("h", font=("TkDefaultFont", 10, "bold"))
-        text.insert("end", "US and Asia-Pacific employer boards: Graduate & PhD → Graduate "
+        text.insert("end", "US and Asia-Pacific employer boards: Find jobs → PhD & research → Graduate "
                            "employer boards → Region.\n\n")
         for r in US_ASIA_REGIONS.values():
             text.insert("end", f"{r.name}\n", "h")
@@ -1991,7 +2000,7 @@ class App(tk.Tk):
         self.tests_summary = tk.StringVar(
             value="Checks that every job source answers, LM Studio has the CV models, and "
                   "this PC can run them. Nothing is changed or stored.")
-        ttk.Label(tab, textvariable=self.tests_summary, foreground="#555").pack(
+        ttk.Label(tab, textvariable=self.tests_summary, foreground=self.MUTED).pack(
             anchor="w", pady=(6, 4))
 
         wrap = ttk.Frame(tab)
@@ -2010,7 +2019,7 @@ class App(tk.Tk):
                                ("fail", self.BAD), ("skip", self.MUTED)):
             self.tests_tree.tag_configure(status, foreground=colour)
         self.tests_detail = tk.StringVar(value="")
-        ttk.Label(tab, textvariable=self.tests_detail, foreground="#333", wraplength=1000,
+        ttk.Label(tab, textvariable=self.tests_detail, foreground=self.TEXT, wraplength=1000,
                   justify="left").pack(anchor="w", pady=(4, 0))
         self.tests_tree.bind("<<TreeviewSelect>>", self._on_check_select)
         self._check_results: dict[str, system_checks.Result] = {}
@@ -2093,7 +2102,7 @@ class App(tk.Tk):
                 link = ttk.Label(f, text="get one", foreground=self.LINK, cursor="hand2")
                 link.grid(row=i, column=2, sticky="w")
                 link.bind("<Button-1>", lambda _e, u=url: webbrowser.open(u))
-        ttk.Label(f, foreground="#555", wraplength=460, justify="left",
+        ttk.Label(f, foreground=self.MUTED, wraplength=460, justify="left",
                   text=f"Saved unencrypted in {_settings_path()}. Keys typed here override "
                        "environment variables of the same name. Leave a field empty to "
                        "remove the key.").grid(
@@ -2208,12 +2217,25 @@ class App(tk.Tk):
             messagebox.showinfo("No boards yet",
                                 "No tracked company has a known job board. Run 'Probe' first.")
             return
-        text = "\n".join(f'    Board("{r["name"]}", "{r["ats"]}", "{r["ats_slug"]}", '
-                         f'"{r["market"]}", "robotics"),' for r in rows)
+        # Personio boards are read by personio_jobs.py, not robotics_track.py (whose
+        # ATS list has no Personio): as Board(...) lines they could not be fetched.
+        boards = [r for r in rows if r["ats"] != "personio"]
+        personio = [r for r in rows if r["ats"] == "personio"]
+        market = lambda r: r["market"] if len(r["market"] or "") == 2 else "DE"
+        parts = []
+        if boards:
+            parts.append("# robotics_track.py, BOARDS:\n" + "\n".join(
+                f'    Board("{r["name"]}", "{r["ats"]}", "{r["ats_slug"]}", '
+                f'"{r["market"]}", "robotics"),' for r in boards))
+        if personio:
+            parts.append("# personio_jobs.py, COMPANIES:\n" + "\n".join(
+                f'    PersonioCompany("{r["name"]}", "{r["ats_slug"]}", "{market(r)}", "robotics"),'
+                for r in personio))
         self.clipboard_clear()
-        self.clipboard_append(text)
-        self.log(f"copied {len(rows)} Board(...) entries — paste them into BOARDS in "
-                 "robotics_track.py to monitor these companies permanently")
+        self.clipboard_append("\n\n".join(parts))
+        self.log(f"copied {len(boards)} Board(...) entries for robotics_track.py and "
+                 f"{len(personio)} PersonioCompany(...) entries for personio_jobs.py - paste "
+                 "them there to monitor these companies permanently")
 
     def load_radar(self) -> None:
         self.radar_tree.delete(*self.radar_tree.get_children())
@@ -2306,6 +2328,10 @@ class App(tk.Tk):
 
     def run_probe(self) -> None:
         typed = [n.strip() for n in self.radar_probe_names.get().split(",") if n.strip()]
+        # a typed name that is a company already listed updates that row: "AMP Robotics"
+        # was added beside "AMP Robotics Corp" (2026-10-11)
+        listed = {company_base_key(r["name"]): r["name"] for r in self.radar.all()}
+        typed = [listed.get(company_base_key(n), n) for n in typed]
         pending = typed or [r["name"] for r in self.radar.all() if not r["ats"]][:30]
         if not pending:
             messagebox.showinfo("Nothing to probe",
@@ -3056,7 +3082,7 @@ class App(tk.Tk):
             provider = PhdProvider()
             if provider.ping(on_log=w.log) == 0:
                 w.log("EURES reports 0 vacancies portal-wide — likely a temporary portal issue.")
-            grand_total = kept = 0
+            grand_total = kept = off_field = 0
             for code in codes:
                 if w.cancelled.is_set():
                     return
@@ -3075,10 +3101,14 @@ class App(tk.Tk):
                             continue
                         if SENIOR_MARKERS.search(job.title):
                             continue
+                        if not matches_field(job, field):     # EURES matches ANY query word
+                            off_field += 1
+                            continue
                         kept += 1
                         if self.store.upsert(job):
                             w.found(job)
-            w.log(f"{grand_total} returned by EURES, {kept} passed filters")
+            w.log(f"{grand_total} returned by EURES, {kept} passed filters"
+                  + (f" ({off_field} not about {field!r} left out)" if off_field else ""))
             if grand_total and not kept:
                 w.log("Everything was filtered out — try unticking 'Funded positions only'.")
             elif not grand_total:
@@ -3146,7 +3176,7 @@ class App(tk.Tk):
             attr = {"internship": "internship", "working_student": "working_student",
                     "werkstudent": "working_student",
                     "graduate": "graduate", "thesis": "thesis"}
-            grand_total = kept = 0
+            grand_total = kept = off_field = 0
             for code in codes:
                 if w.cancelled.is_set():
                     return
@@ -3173,6 +3203,9 @@ class App(tk.Tk):
                         ok, _ = is_student_suitable(job)
                         if not ok:
                             continue
+                        if not matches_field(job, field):     # EURES matches ANY query word
+                            off_field += 1
+                            continue
                         label = classify(job, market)
                         if strict and label is None:
                             continue
@@ -3180,7 +3213,8 @@ class App(tk.Tk):
                         kept += 1
                         if self.store.upsert(job):
                             w.found(job)
-            w.log(f"{grand_total} returned by EURES, {kept} passed filters")
+            w.log(f"{grand_total} returned by EURES, {kept} passed filters"
+                  + (f" ({off_field} not about {field!r} left out)" if off_field else ""))
             if grand_total and not kept:
                 w.log("Everything was filtered out — try a broader field term.")
             elif not grand_total:
@@ -3195,6 +3229,10 @@ class App(tk.Tk):
         self.rows.clear()
         for r in self.store.all():
             self._insert(Job.from_row(r))
+        # counted here too: with no rows nothing is inserted, and the sidebar kept
+        # "Jobs 221" after every job was deleted (2026-10-11)
+        self._new_ids &= set(self.rows)
+        self._count_badges()
         self._sort("fit", reverse=True)
         fresh = sum(1 for j in self.rows.values() if (a := age_hours(j)) is not None and a <= 24)
         self.log(f"loaded {len(self.rows)} saved roles · {fresh} posted in the last 24h")

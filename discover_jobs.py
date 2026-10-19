@@ -136,6 +136,21 @@ _REGION_RX = {
     "dach": re.compile(rf"\b(?:{_DE_CITIES}|{_DACH})\b", re.IGNORECASE),
     "europe": re.compile(rf"\b(?:{_DE_CITIES}|{_DACH}|{_EUROPE})\b", re.IGNORECASE),
 }
+def _market_of(jobs: list, region: str) -> str:
+    """A company's country code from its jobs' locations ("Munich, DE" -> "DE"; a
+    German city -> "DE"), else the region's own: the first two letters of the region
+    name made "germany" "GE" and "dach" "DA" (2026-10-11)."""
+    known = set().union(*_ISO.values())
+    for j in jobs:
+        loc = getattr(j, "location", "") or ""
+        codes = [c for c in _ISO_TOKEN.findall(loc) if c in known]
+        if codes:
+            return "GB" if codes[0] == "UK" else codes[0]
+        if _REGION_RX["germany"].search(loc):
+            return "DE"
+    return {"germany": "DE", "dach": "DE", "europe": "EU"}.get(region, "?")
+
+
 _ISO_TOKEN = re.compile(r"(?:^|[\s,(/|-])([A-Z]{2})(?=$|[\s,)/|-])")
 _REMOTE = re.compile(r"\bremote\b|\bhome ?office\b|\banywhere\b", re.IGNORECASE)
 
@@ -567,7 +582,7 @@ class Discovery:
     def _note_company(self, name: str, b: dict, kept: list[Job]) -> None:
         board_url = kept[0].url.split("/job")[0] if kept[0].url else ""
         self.companies[name.lower()] = Company(
-            name=name, market=self.region.upper()[:2] if self.region != "anywhere" else "?",
+            name=name, market=_market_of(kept, self.region),
             signal="discovered", detail=f"{len(kept)} matching of {b['roles']} open · "
                                         f"e.g. {kept[0].title[:60]} · via {b.get('origin', 'crawl')}",
             ats=b["ats"], ats_slug=b["slug"], board_url=board_url, open_roles=b["roles"])

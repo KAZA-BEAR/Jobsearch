@@ -248,6 +248,8 @@ class FormDScanner:
         # display_names look like "Acme Robotics Inc.  (CIK 0001234567)"
         raw = names[0]
         name = re.sub(r"\s*\(CIK\s*\d+\)\s*$", "", raw).strip()
+        if _FUND_VEHICLE.search(name):
+            return None
         ciks = src.get("ciks") or []
         cik = ciks[0].lstrip("0") if ciks else ""
         filed = src.get("file_date") or ""
@@ -362,6 +364,26 @@ def _market_from(location: str, source: str) -> str:
 # Signal 3: probe for a public ATS board
 # --------------------------------------------------------------------------
 
+def company_base_key(name: str) -> str:
+    """A company name without its legal form, for matching: "AMP Robotics Corp" and
+    "AMP Robotics" are the same company."""
+    base = re.sub(r"[^a-z0-9 ]+", " ", (name or "").lower())
+    base = re.sub(r"\b(inc|llc|ltd|gmbh|corp|corporation|co|kg|ag|se|bv|ab|limited|plc)\b",
+                  " ", base)
+    return re.sub(r"\s+", "", base)
+
+
+# Investment vehicles that file Form D to raise money for someone else - they do not
+# hire: "PALO ALTO CAPITAL ROBOTICS 2 L.P.", "1X Robotics Mar 2026 a Series of
+# CGF2021 LLC", "Garuda Ventures Mind Robotics a Series of ..." (2026-10-11).
+_FUND_VEHICLE = re.compile(
+    r"\bL\.?\s?P\.?$|\ba series of\b|\bfund\b|\bspv\b|\bfeeder\b|\bventures?\b|\binvestors?\b|"
+    # syndicate vehicles: "Gaingels Path Robotics 2026 LLC", "... Moonrock Cap Ltd"
+    r"\bgaingels\b|\bcap\s+(?:ltd|llc|lp)\b|\b20\d\d\s+llc$|"
+    r"\bcapital\b.*\b(?:l\.?l\.?c\.?|l\.?p\.?)$|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)"
+    r"\w* 20\d\d\b", re.I)
+
+
 class BoardProber:
     """Given a company name, guess ATS slugs and see which return a live board.
 
@@ -426,10 +448,38 @@ class BoardProber:
                 if on_log:
                     on_log(msg)
                 return c
+        if self._probe_personio(c, on_log):
+            return c
         c.detail = "no public ATS board found"
         if on_log:
             on_log(f"  – {name}: no public board")
         return c
+
+    def _probe_personio(self, c: Company, on_log=None) -> bool:
+        """Personio, the board most German employers use, which the JSON endpoints
+        above do not cover: Wandelbots and Franka Robotics were reported "no public
+        board" although both have one (2026-10-11). Personio answers 404 for a name
+        it does not know, so a valid feed is evidence even with no open roles."""
+        from personio_jobs import HOSTS, PersonioCompany, PersonioFeeds
+        from personio_jobs import slug_candidates as personio_slugs
+        feeds = PersonioFeeds(rpm=60)
+        for slug in personio_slugs(c.name):
+            jobs = feeds.fetch(PersonioCompany(c.name, slug))
+            if jobs is None:
+                continue
+            c.ats, c.ats_slug, c.open_roles = "personio", slug, len(jobs)
+            c.board_url = (jobs[0].url.split("/job/")[0] if jobs
+                           else HOSTS[0].format(slug=slug))
+            sample = "; ".join(j.title for j in jobs[:2])
+            c.detail = (f"{len(jobs)} open roles on personio — verify: {sample}" if jobs
+                        else "personio board, no open roles right now")
+            msg = f"  ? {c.name}: personio/{slug} — {len(jobs)} roles" + (
+                f", e.g. {sample}" if sample else "")
+            print(msg, file=sys.stderr)
+            if on_log:
+                on_log(msg)
+            return True
+        return False
 
     @staticmethod
     def _sample(ats: str, data, n: int = 2) -> str:

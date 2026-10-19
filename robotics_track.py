@@ -26,7 +26,7 @@ from dataclasses import dataclass
 import requests
 
 from linkedin_jobs import Job, PROVIDERS, RateLimiter, Store, request_with_retry
-from eu_student_jobs import MARKETS, SENIOR_MARKERS, EuresProvider
+from eu_student_jobs import MARKETS, SENIOR_MARKERS, EuresProvider, matches_field
 
 # --------------------------------------------------------------------------
 # PhD search vocabulary
@@ -144,7 +144,8 @@ class Board:
 BOARDS: tuple[Board, ...] = (
     # Pure-play robotics
     Board("Dexory", "greenhouse", "dexory", "GB", "robotics"),
-    Board("Wayve", "greenhouse", "wayve", "GB", "mobility"),
+    # moved from Greenhouse (404 since) to Ashby - checked 2026-10-12
+    Board("Wayve", "ashby", "wayve", "GB", "mobility"),
     Board("Ocado Technology", "greenhouse", "ocadogroup", "GB", "robotics"),
     Board("ANYbotics", "lever", "anybotics", "CH", "robotics"),
     Board("Robco", "ashby", "robco", "DE", "robotics"),
@@ -394,6 +395,9 @@ def cmd_phd(args) -> None:
                 try:
                     for job in provider.search_phd(query, code, args.pages):
                         seen += 1
+                        if not matches_field(job, field):    # EURES matches ANY query word
+                            filtered += 1
+                            continue
                         if args.funded_only and not FUNDING_MARKERS.search(
                             job.title + " " + job.description
                         ):

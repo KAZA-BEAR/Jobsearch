@@ -257,12 +257,15 @@ def run_sweep(force: bool = False, log=print, cancelled: threading.Event | None 
             log(f"[sweep] employer boards: {len(kept)} relevant roles")
 
         if src.get("eures") and not stop.is_set():
-            from eu_student_jobs import EuresProvider, is_student_suitable
+            from eu_student_jobs import EuresProvider, is_student_suitable, matches_field
             ep = EuresProvider()
+            field = cfg["eures"]["field"]
             for code in cfg["eures"]["countries"]:
                 try:
-                    jobs = ep.search(cfg["eures"]["field"], "", 1, False, country=code, on_log=log)
-                    keep("eures", [j for j in jobs if is_student_suitable(j)[0]])
+                    jobs = ep.search(field, "", 1, False, country=code, on_log=log)
+                    # EURES matches ANY word of a multi-word field (2026-10-12)
+                    keep("eures", [j for j in jobs if is_student_suitable(j)[0]
+                                   and matches_field(j, field)])
                 except Exception as exc:
                     fail("eures", code, exc)
 

@@ -31,21 +31,25 @@ SYSTEM = ("You write and check job-application text for one candidate. Follow th
 # ad's tasks - "Integrated LiDAR sensors into a drone swarm" for a manipulator
 # project - and upgraded "coordinated with teams" to "led teams".
 
-BULLET = """Lightly edit this CV bullet.
+# Fixed rules first, the bullet's own details last (prompt cache, 2026-10-11).
+BULLET = """Lightly edit the CV bullet at the end.
 
 Rules:
 - Keep its exact meaning and every number, tool and fact. Add nothing new.
 - Do not make the role sound bigger ("coordinated" must not become "led").
 - Plain verbs. Never use enhance, boost, elevate, ensure, leverage, showcase,
   spearhead or similar CV buzzwords.
-{mapping}- Start with a verb ({tense} tense), ideally the original one. Put these job
-  keywords, which the bullet already contains, right after that verb so they stand
-  out: {keep}
-- At most 30 words, {language}.{extra}
+- Start with a verb in the tense given below, ideally the original one. Put the job
+  keywords listed below, which the bullet already contains, right after that verb so
+  they stand out.
+- At most 30 words, in the language given below.
 
 Answer as JSON: "text" = the edited bullet, "keywords_used" = the keywords from
-the list above that the edited bullet contains.
+the list below that the edited bullet contains.
 
+Tense: {tense}. Language: {language}.
+Job keywords: {keep}
+{mapping}{extra}
 Bullet: {bullet}"""
 
 
@@ -113,7 +117,26 @@ CLAIM_RULES = """- State only what the facts say. Never add a skill, tool, task,
 - Do not say how a fact matches, prepares for or aligns with the job; state the fact."""
 
 
-COVER = """Write the BODY of a cover letter in {language} for the job below, as the candidate.
+# The opening every writer prompt shares, word for word: rules, style, job and facts.
+# LM Studio keeps the last prompt it read per model and re-reads only what changed,
+# so the recruiter message, a rewrite and the style revision skip the ~2,000 tokens
+# the letter prompt already read - with the task at the END, not the start
+# (2026-10-11; the 27B writer reads a prompt slowly, partly from system memory).
+WRITER_CONTEXT = """Rules for every sentence about the candidate:
+{claims}
+
+{style}
+
+JOB:
+{jd}
+
+CANDIDATE FACTS (the only things you may state about the candidate; each has an ID):
+{profile}
+
+"""
+
+COVER = WRITER_CONTEXT + """TASK: Write the BODY of a cover letter in {language} for the job above, as the
+candidate.
 
 Content:
 - Choose at most FOUR work or project facts - the ones that best match the numbered
@@ -129,9 +152,7 @@ Content:
   keen to learn ONE of them, in one sentence.
 - Never write a sentence that only restates a job requirement ("C++ is required for
   this role"), and never claim contact or collaboration with the employer.
-
-Rules for every sentence about the candidate:
-{claims}
+- Follow the rules and the writing style above for every sentence.
 
 Form: 3 or 4 paragraphs separated by one blank line, 180-280 words. (1) the role and
 the candidate's current studies; (2) and (3) the chosen facts; (4) optional: one
@@ -140,7 +161,7 @@ write "we"/"our" as the company; never copy sentences from the job ad. No saluta
 sign-off, date, address or markdown.
 
 Citations - required:
-- Every fact below has an ID (F1, F2, ... and I1 for research interests). End EVERY
+- Every fact above has an ID (F1, F2, ... and I1 for research interests). End EVERY
   sentence with the IDs of the facts it uses, in square brackets: "... computation
   engine [F9]." or "... [F3, F9]." The "proof" lines under JOB are copies of these
   facts: cite the matching ID.
@@ -148,20 +169,12 @@ Citations - required:
   nothing the candidate did or has ends with [J].
 - A sentence may say only what its cited facts say.
 
-{style}
-
-JOB:
-{jd}
-
-CANDIDATE FACTS (the only things you may state about the candidate):
-{profile}
-
 Output only the cover letter body, with the citations."""
 
 # "exact title ... never translated": Qwen3-4B translated the BMW title's
 # "Flussregelung" (flux control) as "river regulation".
-RECRUITER_ONLY = """Write a short message in {language} from the candidate to a recruiter
-about the job below, as JSON with three fields, each ONE sentence:
+RECRUITER_ONLY = WRITER_CONTEXT + """TASK: Write a short message in {language} from the candidate to
+a recruiter about the job above, as JSON with three fields, each ONE sentence:
 - "intro": in the first person ("I am ..."), who the candidate is and which role they
   are writing about - the role's exact title from the job, copied as written,
 - "evidence": ONE piece of work that fits the role - a job or project fact (a line
@@ -173,18 +186,8 @@ about the job below, as JSON with three fields, each ONE sentence:
   a question mark. Never ask the recipient about their own preferences or whether
   THEY want to apply - they are hiring, not applying.
 Never claim a relationship, prior contact or interest in the employer's past work. No
-greeting ("Dear ..."), no thanks or signature.{recruiter_line}
-
-Rules for every sentence about the candidate:
-{claims}
-
-{style}
-
-JOB:
-{jd}
-
-CANDIDATE FACTS (the only things you may state about the candidate):
-{profile}
+greeting ("Dear ..."), no thanks or signature.{recruiter_line} Follow the rules and the
+writing style above. Do not write the fact IDs (F1, F2, ...) in the message.
 
 Output only the JSON."""
 
@@ -200,6 +203,13 @@ RECRUITER_SCHEMA = {
 
 
 _SENTENCE = re.compile(r"(?<=[.!?])\s+")
+# The recruiter prompt shares the letter's numbered facts (for the prompt cache);
+# an "[F3]" the writer copies anyway is removed here.
+_CITE_TAG = re.compile(r"\s*\[(?:[FIJ]\d*\s*,?\s*)+\]")
+
+
+def _uncite(text: str) -> str:
+    return _CITE_TAG.sub("", text or "")
 
 
 def join_recruiter(raw: str) -> str:
@@ -213,16 +223,43 @@ def join_recruiter(raw: str) -> str:
     try:
         d = json.loads(raw)
     except ValueError:
-        return raw.strip()
+        return _uncite(raw).strip()
     if not isinstance(d, dict):
-        return raw.strip()
+        return _uncite(raw).strip()
 
     def sentences(key):
-        return [s.strip() for s in _SENTENCE.split((d.get(key) or "").strip()) if s.strip()]
+        return [s.strip() for s in _SENTENCE.split(_uncite(d.get(key) or "").strip()) if s.strip()]
 
     intro, evidence, question = sentences("intro"), sentences("evidence"), sentences("question")
-    ask = next((s for s in question if s.endswith("?")), question[-1] if question else "")
-    return " ".join(x for x in (intro[:1] + evidence[:1] + [ask]) if x).strip()
+    ask = _just_question(next((s for s in question if s.endswith("?")),
+                              question[-1] if question else ""))
+    # Each part ends a sentence: an evidence part without its full stop ran into the
+    # question ("... Technische Hochschule Deggendorf What does the team ...?",
+    # Fraunhofer 2026-10-11).
+    ended = lambda s: s if not s or s[-1] in ".!?" else s + "."
+    return " ".join(ended(x) for x in (intro[:1] + evidence[:1] + [ask]) if x).strip()
+
+
+# A question word starting a new sentence that has no full stop before it.
+_RUN_ON_QUESTION = re.compile(r"(?<=\w)\s+(?=(?:What|How|Which|Who|Could|Would|Can|Is|Are|Do|Does|"
+                              r"Did|When|Where|Why|Will|Should|May)\b[^?]*\?\s*$)")
+
+
+def _just_question(text: str) -> str:
+    """Only the question: "I wrote and debugged C++/Python code ... at SOCO Engineers
+    GmbH What does the team expect ...?" -> "What does the team expect ...?". The
+    writer put a second example in the question field without a full stop, and the
+    message passed as three sentences while reading as four (Fraunhofer, 2026-10-11)."""
+    m = _RUN_ON_QUESTION.search(text or "")
+    # only when what comes before is a statement, not the question's own start
+    # ("Could you tell me ... and What tools ...?" stays whole)
+    if not m or _QUESTION_START.match(text):
+        return text
+    return text[m.end():]
+
+
+_QUESTION_START = re.compile(r"\s*(?:What|How|Which|Who|Could|Would|Can|Is|Are|Do|Does|Did|When|"
+                             r"Where|Why|Will|Should|May|I would like to know|I wonder)\b", re.I)
 
 
 def cover_only_prompt(profile: dict, job: str, lang: str, gaps: str,
@@ -238,17 +275,19 @@ def cover_only_prompt(profile: dict, job: str, lang: str, gaps: str,
 
 # One rewrite for style only, applied to a letter that already passed the checks;
 # the result is checked again and dropped if anything in it is unsupported.
-STYLE_FIX = """Revise this cover letter body. Fix ONLY these writing problems:
+# Starts like WRITER_CONTEXT (rules, then style), so the prompt cache covers that part.
+STYLE_FIX = """Rules for every sentence about the candidate:
+{claims}
+
+{style}
+
+TASK: Revise the cover letter body below. Fix ONLY these writing problems:
 {problems}{predictable}
 
 Change wording, sentence length and sentence order only. Keep every fact exactly as it
 is stated and keep the same paragraphs. Do not add a sentence, a claim, a tool list or
-a sentence that restates a job requirement, and do not remove a fact.
-
-Rules that still apply to every sentence about the candidate:
-{claims}
-
-{style}
+a sentence that restates a job requirement, and do not remove a fact. The rules above
+still apply to every sentence about the candidate.
 
 LETTER:
 {text}
@@ -308,12 +347,9 @@ def factcheck_prompt(facts: str, text: str) -> str:
 # One sentence against the few facts it cites or draws on: a decomposed entailment
 # check (claim-level, as grounding checkers like MiniCheck do) instead of judging the
 # whole letter against the whole profile, where the 4B judge cut true sentences.
-ENTAIL = """Do these facts about a job candidate support the sentence below?
-
-Facts:
-{facts}
-
-Sentence: {sentence}
+# Rules first, the facts and the sentence last: the judge asks this 10-30 times a run,
+# and the prompt cache then re-reads only the part that changes (2026-10-11).
+ENTAIL = """Decide whether the facts about a job candidate (below) support the sentence (below).
 
 SUPPORTED: the sentence says what the facts say, in any wording, word order or tense,
 or names the same thing more generally ("the computation engine" for "a computation
@@ -328,7 +364,12 @@ NOT supported - answer false - if the sentence:
   "for", "while" or "as part of" another).
 
 Answer with JSON: "supported" true or false, and "added": the words the facts do not
-back (empty when supported)."""
+back (empty when supported).
+
+Facts:
+{facts}
+
+Sentence: {sentence}"""
 
 ENTAIL_SCHEMA = {
     "type": "object", "required": ["supported", "added"],
@@ -449,10 +490,9 @@ def expand_prompt(requirements: list) -> str:
                                                  for i, r in enumerate(requirements, 1)))
 
 
-VERIFY = """Job requirement: "{skill}" (the job ad says: "{quote}")
-
-For each numbered line from a candidate's profile, answer whether that line ALONE shows
-the candidate has this requirement:
+# The requirement and lines last (prompt cache, 2026-10-11).
+VERIFY = """For each numbered line from a candidate's profile (below), answer whether that line
+ALONE shows the candidate has the job requirement (below):
 - "yes": the line names the skill itself or a specific instance of it
   (e.g. "UART, I2C and SPI protocols" shows "serial communication buses").
   A course or a listed skill is "yes" when the ad asks for knowledge or
@@ -460,6 +500,8 @@ the candidate has this requirement:
   control engineering"), and "partly" when the ad asks for hands-on experience.
 - "partly": the line shows only part of the requirement, or a closely related skill.
 - "no": anything else. Working in the same field is not enough.
+
+Job requirement: "{skill}" (the job ad says: "{quote}")
 
 LINES:
 {lines}"""

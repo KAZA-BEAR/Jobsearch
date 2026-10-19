@@ -40,7 +40,7 @@ and by deterministic code checks before it reaches a document.
 | Bundesagentur für Arbeit | Germany's largest job database (public API) |
 | Adzuna Europe | job aggregator for DE, AT, CH, NL, UK, FR, BE, IT, ES, PL (free key) |
 | EURES | EU-wide jobs from the European Commission |
-| EURAXESS | PhD positions across Europe |
+| EURES (doctoral filter) | PhD positions across Europe |
 | Employer ATS boards | Greenhouse, Lever, SmartRecruiters, Ashby, Recruitee, Workday, Personio |
 | Research & new employers | Fraunhofer, DLR, Max Planck, TH Deggendorf feeds, plus open-ended discovery: thousands of startup and company job boards from Common Crawl's public index, career pages of research institutes and engineering companies (Wikidata), Y Combinator startups and Hacker News "Who is hiring?" (`discover_jobs.py`) |
 | New companies | Funding signals and new employers per market (`company_radar.py`) |
@@ -144,8 +144,11 @@ embedding model loads on first use. To use other models, change **Judge model** 
 `--model` / `--writer`.
 
 Notes from testing on an RTX 3050 (6 GB):
-- One job takes about **5–10 minutes** from plan approval to finished files with the
-  default models, most of it the 27B writer and the per-sentence fact-check.
+- One job takes about **2½–5½ minutes** (140–340 s in October 2026 tests) with the
+  default models, most of it the 27B writer and the per-sentence fact-check. Each run's
+  `run_log.txt` shows where the time went. The first call to the writer in a run varies
+  most (20–150 s): on a 6 GB GPU LM Studio moves model layers between the GPU and system
+  memory when it switches from the judge to the writer.
 - Bonsai-27B is a 1-bit (Q1_0) model on the Qwen3.5 architecture and runs fine. Other
   **Qwen3.5**-architecture models at normal quantisations (e.g. Qwen3.5 4B) ran at under
   2 tokens/s on this GPU — avoid them.
@@ -219,7 +222,7 @@ and the latest message, and **Activity log** opens the full log.
 | Page | Purpose |
 |---|---|
 | **Jobs** | every job found so far, best fit first: search, filter (All / New / Last 24h / Tracked, Fit ≥), tailor a CV, track |
-| **Find jobs** | one source at a time, grouped: Germany (Arbeitsagentur, Personio, Workday), Europe (EURES internships, Adzuna, LinkedIn/Indeed), PhD & research (EURAXESS, research institutes and new employers, graduate employer boards), US & Asia (USAJOBS, Adzuna, MyCareersFuture, market notes). Each source shows only its search fields; its checkboxes (countries, sites, sources, "only graduate titles"…) are under **Advanced filters ▸**, which shows what is ticked while closed. Starting a search switches to Jobs, where new rows appear in green |
+| **Find jobs** | one source at a time, grouped: Germany (Arbeitsagentur, Personio, Workday), Europe (EURES internships, Adzuna, LinkedIn/Indeed), PhD & research (PhD positions via EURES, research institutes and new employers, graduate employer boards), US & Asia (USAJOBS, Adzuna, MyCareersFuture, market notes). Each source shows only its search fields; its checkboxes (countries, sites, sources, "only graduate titles"…) are under **Advanced filters ▸**, which shows what is ticked while closed. Starting a search switches to Jobs, where new rows appear in green |
 | **Applications** | application tracker and the CV & cover-letter generator |
 | **New companies** | companies and startups newly hiring, and their job boards |
 | **Settings** | CV models and server, profile, API keys, daily sweep, SEC email, health checks |
@@ -246,7 +249,25 @@ If the job's required skills are all missing from your profile, the app writes t
 and the report but **no cover letter** ("no cover letter: none of the required skills are
 in your profile"): a letter could only list unrelated experience.
 
-To track a job, select it under **Jobs** and use **Track ▾** (or right-click it).
+**EURES searches** (internships/Werkstudent and PhD positions) keep only jobs that mention
+your field term, in any of the ads' languages (Mechatronik, mechatronica and mekatronik
+all count for "mechatronics"). EURES itself matches *any* word of a query, so without
+this "Werkstudent mechatronics" returned every Werkstudent ad.
+
+**New companies** finds employers three ways: **Scan funding** (US SEC Form D filings;
+investment vehicles such as "… Fund LP" or "a Series of …" are skipped), **Find employers**
+(employers in your collected jobs that no list monitors yet), and **Probe**, which looks
+for a public job board on Greenhouse, Lever, SmartRecruiters, Ashby, Recruitee and
+Personio. A typed name updates a company already listed ("AMP Robotics" → "AMP Robotics
+Corp"). **More ▾ → Copy board entries** copies ready-to-paste lines for monitoring them
+permanently: `Board(…)` lines for `robotics_track.py` and `PersonioCompany(…)` lines for
+`personio_jobs.py`. Each company's market code comes from its job locations (DE, CH,
+NL, GB…).
+
+To track a job, select it under **Jobs** and use **Track ▾** (or right-click it). In the
+tracker on **Applications**, setting a job to *applied* stamps today's date and a
+follow-up 7 days later unless you type your own dates; a due follow-up turns the row red
+and shows "1 due" in the sidebar.
 **More ▾** on the Jobs page exports the visible jobs, logs a summary by source, type,
 market and company, re-scores against your profile, and deletes untracked jobs.
 **Fit score** (Applications) scores pasted text without adding it to the list.
@@ -320,35 +341,57 @@ job ad ──► 1  requirements (quote-verified) + job title/company
               a job or project bullet naming the skill beats a skills-list line
            3  rewrite plan (you can review it)
            4  CV bullets reworded one at a time by the judge, each checked
-           5  cover letter by the writer, from numbered facts (F1, F2, …):
+           5  recruiter message (3 sentences) by the writer: intro, one real job
+              or project example, one question; fact-checked, missing parts
+              completed in code
+           6  cover letter by the writer, from numbered facts (F1, F2, …):
               every sentence cites the fact(s) it uses
               → each sentence checked against its own cited facts (judge + code);
-                one that says more is replaced with the profile's own line
-              → at most 4 work/project examples, ranked by relevance to the job;
+                one that says more is replaced with the profile's own line, or
+                dropped when the letter already states that fact
+              → at most 4 work/project examples, ranked by relevance to the job
+                (its requirements, and the job title's words counted double);
                 each says where it happened
+              → short but true? free repairs in code first: opening and closing,
+                paragraphs, your courses and languages. Only if that is not
+                enough does the writer draft or rewrite again
               → whole-letter fact-check (judge + code) → clean-up (padding,
-                repeats, job-ad talk) → opening/closing added
-              → short but true? split into paragraphs, add your courses and
-                languages; still too little? letter built from profile.json instead
-           6  recruiter message (3 sentences): intro, one real job or project
-              example, one question; fact-checked the same way
-           7  LaTeX → PDF, report.md
+                repeats, job-ad talk; "keen to learn" after the facts)
+              → style revision by the writer only when the letter reads as
+                machine-like (predictability above 50), kept only if nothing new
+                is claimed
+              → still too little? letter built from profile.json instead
+           7  LaTeX → PDF, report.md, run_log.txt
 ```
+
+The recruiter message is written before the letter on purpose: both prompts start with
+the same rules, style guide, job brief and facts, so LM Studio's prompt cache lets the
+letter skip re-reading about 1,700 tokens. Every step that needs no model (the repairs,
+clean-up, ordering) runs before any extra call to the slow 27B writer.
 
 **What the checks guard against** (deterministic code in `ats_checks.py` and
 `ats_pipeline.py`, on top of the judge model):
 - claiming a requirement you do not meet, or a skill/tool not in your profile
-- adding a tool to a fact that does not mention it ("…ANSYS workflows using Python")
-- inflation ("led", "expertise", "extensive"), made-up numbers, "1 feature" → "features"
+- adding a tool to a fact that does not mention it ("…ANSYS workflows using Python"),
+  also via a follow-up sentence that cites only your skills list ("This work used
+  Solidworks and FreeCAD for modeling.")
+- inflation ("led", "expertise", "extensive", "hands-on", "in-depth", "proven"), made-up
+  numbers, "1 feature" → "features"
 - merging two bullets into one claim, or attaching work to the wrong employer/project
+  (words of the job title itself, like "Embedded" or "bipedal robots", never count as a
+  claim)
 - "This reduced downtime…" placed after a different example than the one it belongs to
 - research interests presented as experience, coursework, skills or "focus"
-- an unfinished degree mentioned without saying so; schools renamed or translated
+- an unfinished degree mentioned without saying so; schools renamed or translated, also
+  half-translated ("Technical Hochschule Deggendorf")
 - "keen to learn X" when X is already in your profile, and empty "keen to learn about the
   role" lines
 - text copied from the job ad or addressed to the reader ("you will…"), restating
   the job's requirements, and tool lists longer than three items
-- the same place named in every sentence ("As a … at …, I …" → "There, I also …")
+- the same place named in every sentence ("As a … at …, I …" → "There, I also …"), or
+  twice in one sentence; your courses mentioned twice
+- recruiter messages with a run-on question, a missing comma, or a title noun where a
+  verb belongs ("approach Integration LiDAR data" → "approach integrating …")
 - CV bullets that drop a number, tool or action verb, add buzzwords, or repeat words
 
 Job titles and company names with abbreviations ("Stud. Assistant", "H. & W. … GmbH",
@@ -376,6 +419,7 @@ folder is in `.gitignore`.
 | `cover_letter_styled.tex/.pdf` (+ `info.tex`, `body.tex`) | styled cover letter |
 | `recruiter_message.txt` | short message for LinkedIn / email |
 | `report.md` | what was generated and everything you should check (below) |
+| `run_log.txt` | the run's timed log: every model call by step (requirements, letter draft, sentence check, style revision…) with seconds and token counts, then the activity log. Time spent reviewing the plan is not counted |
 | `tailored_experience.json` | the reworded experience section and notes |
 
 **`report.md` sections** (a section appears only when it has something to say):
@@ -388,7 +432,7 @@ folder is in `.gitignore`.
 | Removed by the fact-check | sentences cut as unsupported by your profile, and why; repaired ones show the replacement |
 | Left out to keep the letter to 4 examples | true facts dropped as less relevant to this job |
 | The model's draft that was replaced | when the letter fell back to the plain profile version: the reason and the draft |
-| Removed by the clean-up | padding, repeats and job-ad talk taken out |
+| Removed by the clean-up | padding, repeats and job-ad talk taken out (sentences only reworded or shortened are not listed) |
 | Checks that still fail | warnings to act on (e.g. German level, unfinished degree, letter built from the profile) |
 | Sentences to double-check | sentences the model worded itself; they passed every check, but only you know if each is exactly right |
 | Notes | e.g. how many sentences the fact-check changed |
@@ -439,7 +483,7 @@ Generated CVs and letters go to `ats_outputs\` in the project folder instead (se
 | `system_checks.py` | the health checks (Settings): API, LM Studio and hardware |
 | `linkedin_jobs.py` | job model, SQLite store, shared HTTP helpers, LinkedIn APIs |
 | `eu_student_jobs.py` | EURES and student-job classification |
-| `robotics_track.py` | EURAXESS PhDs and employer ATS boards |
+| `robotics_track.py` | PhD positions (EURES doctoral filter) and employer ATS boards |
 | `ba_jobsuche.py`, `personio_jobs.py`, `workday_jobs.py`, `research_jobs.py` | further sources |
 | `company_radar.py` | newly hiring companies |
 | `discover_jobs.py` | open-ended discovery: Common Crawl job boards, career-page detector, Wikidata, YC, HN |
@@ -457,7 +501,7 @@ Generated CVs and letters go to `ats_outputs\` in the project folder instead (se
 | "Not downloaded in LM Studio: …" | download the named model in LM Studio |
 | "lms tool was not found" | install LM Studio's CLI (`~\.lmstudio\bin\lms.exe`) or load the models manually |
 | A model loads but is extremely slow | it is probably a Qwen3.5-architecture model at a normal quantisation — use the defaults |
-| A job takes 5–10 minutes | normal with the 27B writer on a 6 GB GPU; a smaller writer is faster but its letters lose more to the fact-check |
+| A job takes several minutes | 2½–5½ minutes is normal with the 27B writer on a 6 GB GPU; `run_log.txt` in the output folder lists every model call with its time. A smaller writer is faster but its letters lose more to the fact-check |
 | "answer ran past its … token limit" | raise the model's context in LM Studio to 8k+ |
 | Cover letter "assembled from profile.json" | the writer's draft lost too much to the fact-check; `report.md` shows the draft and the reason. The letter is true but plain — personalise it |
 | "no cover letter: none of the required skills are in your profile" | intentional: the CV is still written; a letter would have nothing relevant to say |

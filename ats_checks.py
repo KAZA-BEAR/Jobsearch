@@ -983,12 +983,30 @@ _SAFE_QUESTION = {"en": "Could you tell me more about the research topics planne
 
 
 def fix_recruiter_question(text: str) -> str:
-    """Replace a question aimed the wrong way with a neutral one about the role."""
+    """Replace a question aimed the wrong way with a neutral one about the role, and
+    mend a noun copied from the job title where a verb belongs."""
     parts = [x for x in re.split(r"(?<=[.!?])\s+", (text or "").strip()) if x.strip()]
     if parts and _WRONG_ASK.search(parts[-1]):
         parts[-1] = _SAFE_QUESTION[text_language(text)]
         return " ".join(parts)
+    if parts:
+        fixed = _APPROACH_NOUN.sub(_as_gerund, parts[-1])
+        if fixed != parts[-1]:
+            parts[-1] = fixed
+            return " ".join(parts)
     return text
+
+
+# "How does the team approach Integration LiDAR data ...?" - the title's "Integration"
+# copied where a verb belongs (DLR LiDAR, 2026-10-11, twice). Only after "approach",
+# where "-ing" is always right ("integration of" stays: that is a correct noun).
+_APPROACH_NOUN = re.compile(r"\b(approach(?:es)?)\s+(?:the\s+)?([A-Z]?[a-z]+?)(ation|ction)\s+"
+                            r"(?!of\b|for\b|with\b|and\b|in\b|on\b|to\b|at\b|by\b)(?=[A-Za-z])")
+
+
+def _as_gerund(m) -> str:
+    stem = m.group(2).lower()
+    return f"{m.group(1)} {stem}{'ating' if m.group(3) == 'ation' else 'cting'} "
 
 
 _LEARNING = re.compile(r"\b(learn\w*|eager|keen|looking forward|interested in|curious|"
@@ -1768,8 +1786,12 @@ def mixed_details(text: str, profile: dict) -> list:
         # read as one, path planning was "attached" to the UAV job.
         # A clause that alone fits no single piece of work ("I implemented path
         # planning for the UAV" - two UAV entries) is read with the sentence's work.
-        whole, at = _borrowed(sentence, units, unique, terms)
-        for clause in _CLAUSES.split(sentence):
+        # The job title is not a claim: "applying for the Werkstudent/in - Embedded-
+        # Softwareentwicklung position ... at Technische Hochschule Deggendorf" was
+        # cut for attaching "embedded" to the lab job (DLR, 2026-10-11).
+        own = _without_job_title(sentence)
+        whole, at = _borrowed(own, units, unique, terms)
+        for clause in _CLAUSES.split(own):
             borrowed, a = _borrowed(clause, units, unique, terms)
             if a < 0 and at >= 0:
                 borrowed, a = [b for b in whole if re.search(re.escape(b), clause, re.I)], at
@@ -1808,8 +1830,11 @@ def _borrowed(clause: str, units: list, unique: list, terms: list) -> tuple:
     return borrowed, a
 
 
+# "hands-on" etc. too: "My background includes hands-on work with C++ and Python" for
+# "Wrote and debugged C++/Python code" passed every check (ZEISS, 2026-10-12)
 _INFLATE_WIDE = re.compile(r"\b(led|headed|spearheaded|directed|supervised|oversaw|"
-                           r"cross-functional|expertise|expert|extensive|mastered)\b", re.I)
+                           r"cross-functional|expertise|expert|extensive|mastered|"
+                           r"hands-on|in-depth|proven|seasoned)(?![\w-])", re.I)
 
 
 _PRESUPPOSED = re.compile(r"\b(?:deepen|further|expand|broaden|strengthen|grow|build on|"
@@ -1848,12 +1873,15 @@ def inflated_claims(text: str, profile: dict) -> list:
         part = _claim_part(sentence)
         if not re.search(r"\b(i|my|me)\b", part, re.I) or sentence.rstrip().endswith("?"):
             continue
+        # whole words: "led" is inside "controlled", "detailed" ..., so a substring
+        # test let "I led a team" pass (2026-10-12)
+        in_profile = lambda w: re.search(rf"(?<![\w-]){re.escape(w)}(?![\w-])", blob)
         hits = {m.group(1).lower() for m in _INFLATE_WIDE.finditer(part)
-                if m.group(1).lower() not in blob}
+                if not in_profile(m.group(1).lower())}
         # "keen to deepen my expertise" is exempt as wanting to learn, but it says
         # the expertise already exists
         hits |= {m.group(1).lower() for m in _PRESUPPOSED.finditer(sentence)
-                 if m.group(1).lower() not in blob}
+                 if not in_profile(m.group(1).lower())}
         hits = sorted(hits)
         if hits:
             out.append((sentence.strip(), f"uses {', '.join(hits)} - your profile never says that"))

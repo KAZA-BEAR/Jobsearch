@@ -253,6 +253,13 @@ def _language_status(skill: str, profile: dict, job_description: str):
     return "gap", ""
 
 
+def _word_rx(word: str):
+    """A skill word and its forms: "PCB" -> PCBs, "design" -> designed. The end is
+    bounded: "contr..." (control) matched "Contributed" and made a UAV bullet the
+    proof of "control systems" (2026-10-11)."""
+    return re.compile(rf"\b{re.escape(word[:max(5, len(word) - 2)])}[a-z]{{0,5}}\b", re.I)
+
+
 def _stems(text: str) -> set:
     return {w.lower()[:5] for w in checks._WORD.findall(text)
             if w.lower() not in checks._STOP and w.lower() not in checks._HR_WORDS and len(w) >= 4}
@@ -297,10 +304,11 @@ def analyse_gaps(profile: dict, requirements: list, call, log,
                 rest = p.sub(" ", rest)
         leftover = [w.lower() for w in checks._WORD.findall(rest)
                     if w.lower() not in checks._STOP and w.lower() not in _GENERIC]
+        # every part of the skill: its vocabulary terms and its other words
+        parts = [pats for _k, pats in terms] + [[_word_rx(w)] for w in leftover]
         # A skill named literally in a job title / project name / line counts too.
         literal = [f"{label}: {line}" for label, line in units
-                   if leftover and all(re.search(rf"\b{re.escape(w[:max(5, len(w) - 2)])}",
-                                                 f"{label} {line}", re.I) for w in leftover)]
+                   if leftover and all(_word_rx(w).search(f"{label} {line}") for w in leftover)]
         if literal:
             lines, leftover = literal + lines, []
         # A job or project bullet naming every word of the skill is better proof than
@@ -308,15 +316,29 @@ def analyse_gaps(profile: dict, requirements: list, call, log,
         # while "designed and manufactured 2-layer PCBs" went unused, and the letter
         # for a PCB job never mentioned it (Fraunhofer, 2026-10-04).
         if lines:
-            # short words too ("PCB"), which checks._WORD skips
+            # short words too ("PCB"), which checks._WORD skips; generic words count
+            # here: without "systems", "control systems" promoted "traffic control"
+            # (the UAV project) over the Control Systems course (2026-10-11)
             words = [w.lower() for w in re.findall(r"[A-Za-z][A-Za-z0-9+#]+", skill)
-                     if w.lower() not in checks._STOP and w.lower() not in _GENERIC]
+                     if w.lower() not in checks._STOP]
             done = [f"{label}: {line}" for label, line in units
                     if words and not label.startswith(("Skills:", "Education:"))
-                    and all(re.search(rf"\b{re.escape(w[:max(5, len(w) - 2)])}", line, re.I)
-                            for w in words)]
+                    and all(_word_rx(w).search(line) for w in words)]
             lines = done + [l for l in lines if l not in done]
-        if not terms and not leftover:
+        # Every part of a compound skill in ONE line: "UAV navigation" was "have" from
+        # "a robot platform for path planning and navigation" - a ground robot, the
+        # UAV came from no line at all (DLR LiDAR, 2026-10-11). A skill listing
+        # alternatives ("C++ or Python", "C/C++") needs any one of them.
+        alternatives = re.search(r"\bor\b|\boder\b|/|,", skill, re.I)
+        partial = False
+        if len(parts) >= 2 and not alternatives and lines:
+            full = [l for l in lines if all(any(p.search(l) for p in group) for group in parts)]
+            partial = not full
+            lines = full + [l for l in lines if l not in full]
+        if not parts:
+            # (parts, not the leftover words: those are emptied once a line names them,
+            # and "traffic observation", named by the UAV project, was then taken for
+            # generic words and shown as "likely", 2026-10-11)
             # Only generic words ("programming knowledge"): too vague to call a gap -
             # calling it one once made a letter say "I do not have programming
             # knowledge" for a candidate who knows Python and C++.
@@ -325,7 +347,7 @@ def analyse_gaps(profile: dict, requirements: list, call, log,
                      if any(re.search(rf"\b{re.escape(w[:max(5, len(w) - 3)])}", f"{label} {line}", re.I)
                             for w in words)]
             status = "likely"
-        elif lines and not leftover:
+        elif lines and not leftover and not partial:
             status = "have"
         elif lines:
             status = "likely"          # partly backed: shown, never used in the CV

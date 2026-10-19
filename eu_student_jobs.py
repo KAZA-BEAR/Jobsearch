@@ -502,6 +502,37 @@ def classify(job: Job, market: Market) -> str | None:
     return None
 
 
+# Words of a field term that say nothing on their own ("electrical engineering": only
+# "electrical" decides).
+_FIELD_GENERIC = {"engineering", "engineer", "engineers", "technology", "technologies",
+                  "technik", "systems", "system", "science", "sciences", "development",
+                  "and", "und", "of", "for", "in"}
+
+
+def field_pattern(field: str):
+    """A regex for a field term in any of the ads' languages, or None for no field.
+    Each specific word must appear, by its stem: "mechatronics" -> mechatron / mekatron
+    (Mechatronik, mechatronica, mekatronik), "robotics" -> robot (Robotik, robotica)."""
+    words = [w for w in re.findall(r"[a-zäöüß]+", (field or "").lower())
+             if len(w) >= 4 and w not in _FIELD_GENERIC]
+    if not words:
+        return None
+    parts = []
+    for w in words:
+        stem = w[:max(5, len(w) - 5)]       # electrical -> elect(ro), robotics -> robot
+        variants = {stem, stem.replace("ch", "k"), stem.replace("c", "k"), stem.replace("k", "c")}
+        parts.append("(?=.*(?:" + "|".join(sorted(map(re.escape, variants))) + "))")
+    return re.compile("".join(parts), re.I | re.S)
+
+
+def matches_field(job: Job, field: str) -> bool:
+    """Does the job mention the field? EURES matches ANY word of a query, so
+    "Werkstudent mechatronics" returned every Werkstudent ad - retail, cleaning,
+    accounting - and 6 of 609 kept jobs were about the field (2026-10-12)."""
+    rx = field_pattern(field)
+    return rx is None or bool(rx.search(f"{job.title} {job.description or ''}"))
+
+
 def is_student_suitable(job: Job) -> tuple[bool, str]:
     title = job.title
     if SENIOR_MARKERS.search(title):

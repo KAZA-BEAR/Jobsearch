@@ -18,12 +18,14 @@ Zero third-party dependencies: models are called over urllib so the app runs
 on a stock Python install on Windows or Linux.
 """
 
+import http.client
 import json
 import os
 import re
 import shutil
 import subprocess
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 import urllib.error
 import urllib.request
@@ -59,16 +61,23 @@ def _post(url: str, payload: dict, headers: dict, timeout: int) -> dict:
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode("utf-8"), method="POST",
         headers={"content-type": "application/json", **headers})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        raise PipelineError(f"API error {e.code}: {e.read().decode('utf-8', 'replace')[:800]}")
-    except urllib.error.URLError as e:
-        raise PipelineError(
-            f"Could not reach {url}: {e.reason}\n"
-            "If you are using LM Studio, open it, load a model, go to the Developer "
-            "tab and press Start Server.")
+    for attempt in (1, 2):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            raise PipelineError(f"API error {e.code}: {e.read().decode('utf-8', 'replace')[:800]}")
+        except (urllib.error.URLError, ConnectionError, http.client.RemoteDisconnected) as e:
+            # One retry when the connection drops (LM Studio swapping models): a single
+            # dropped request used to end a 10-minute run. A timeout is not retried.
+            reason = getattr(e, "reason", e)
+            if attempt == 1 and not isinstance(reason, TimeoutError):
+                time.sleep(3)
+                continue
+            raise PipelineError(
+                f"Could not reach {url}: {reason}\n"
+                "If you are using LM Studio, open it, load a model, go to the Developer "
+                "tab and press Start Server.")
 
 
 # (token, log-probability) pairs of the last answer generated with logprobs=True.
@@ -76,6 +85,11 @@ def _post(url: str, payload: dict, headers: dict, timeout: int) -> dict:
 # text), so they give the real perplexity of the model's own draft sentences.
 # Per thread: drafts from several models are written at the same time.
 _LOGPROBS = threading.local()
+# Token counts of this thread's last answer ({"prompt_tokens", "completion_tokens"}),
+# for the run log.
+_USAGE = threading.local()
+# Servers that answered "API error 4xx" naming the reasoning_effort field.
+_NO_REASONING_FIELD: set = set()
 
 
 def last_logprobs() -> list:
@@ -110,14 +124,21 @@ def _call_openai_compatible(prompt, model, max_tokens, api_key, timeout, base_ur
         payload["logprobs"] = True
     headers = {"authorization": f"Bearer {api_key or 'lm-studio'}"}
     # Reasoning models ignore /no_think (Bonsai 27B spent every token thinking and
-    # returned nothing); LM Studio switches thinking off with reasoning_effort.
-    try:
-        data = _post(f"{base}/chat/completions", dict(payload, reasoning_effort="none"),
-                     headers, timeout)
-    except PipelineError as e:
-        if "API error 4" not in str(e):
-            raise
+    # returned nothing); LM Studio switches thinking off with reasoning_effort. A
+    # server that rejects the field is remembered, so it is not asked twice per call.
+    data = None
+    if base not in _NO_REASONING_FIELD:
+        try:
+            data = _post(f"{base}/chat/completions", dict(payload, reasoning_effort="none"),
+                         headers, timeout)
+        except PipelineError as e:
+            if "API error 4" not in str(e):
+                raise
+            if "reasoning" in str(e).lower():
+                _NO_REASONING_FIELD.add(base)
+    if data is None:
         data = _post(f"{base}/chat/completions", payload, headers, timeout)
+    _USAGE.value = data.get("usage") or {}
     choices = data.get("choices") or []
     if not choices:
         raise PipelineError(f"Empty response from {base}: {str(data)[:400]}")
@@ -149,10 +170,9 @@ def list_local_models(base_url: str = None, timeout: int = 15):
     return [i for i in ids if "embed" not in i.lower()]
 
 
-# The default pair: Qwen3-4B judges and drafts, Llama 3.2 3B drafts too (see the
-# 2026-09-30 pilot: ~75 s a run on a 6 GB RTX 3050). Override with ATS_MODELS.
-# The judge (first model listed). Before the separate letter writer (DEFAULT_WRITER)
-# this was the pair "qwen/qwen3-4b-2507,llama-3.2-3b-instruct", both drafting letters.
+# The judge: requirements, gap check, CV bullet edits and every fact-check. Override
+# with ATS_MODELS. (Until 2026-10-03 the default was the pair
+# "qwen/qwen3-4b-2507,llama-3.2-3b-instruct", both also drafting letters.)
 DEFAULT_LOCAL_MODELS = os.environ.get("ATS_MODELS", "qwen/qwen3-4b-2507")
 # Context each model is loaded with. Loaded on demand, LM Studio gave Llama its
 # maximum (131072), whose working memory filled the GPU so Qwen could not load.
@@ -742,8 +762,27 @@ def _intro_stop(text: str, company: str = "") -> str:
                   r"\1. ", text or "", count=1)
 
 
+# Words that name the same kind of thing in job ads and profiles: an ad's "drone" is
+# the profile's "UAV", and MAVLink / PX4 / ArduPilot are drone software (a MAVLink
+# bullet lost a drone job's last slot to ANSYS on a tie, DLR 2026-10-11).
+_SAME_THING = (("uav", ("drone", "quadco", "multic", "multir", "unmann", "uas", "mavlin",
+                        "px4", "ardupi")),)
+
+
+def _relevance_stems(text: str) -> set:
+    """Content stems for ranking, with "drone"/"quadcopter"/... also counted as "uav"."""
+    stems = checks._content_stems(text or "")
+    # short acronyms too (UAV, ROS, PCB, CAD), which content stems leave out
+    stems |= {m.lower() for m in re.findall(r"\b([A-Z][A-Z0-9]{1,3})s?\b", text or "")}
+    for name, starts in _SAME_THING:
+        if any(s.startswith(starts) for s in stems):
+            stems = stems | {name}
+    return stems
+
+
 def _cited_check(raw: str, ids: dict, call, profile: dict, fact_lines: list,
-                 log, proven=frozenset(), req_stems=frozenset()) -> tuple[str, list]:
+                 log, proven=frozenset(), req_stems=frozenset(),
+                 title_stems=frozenset()) -> tuple[str, list]:
     """Check each sentence of a cited draft against the facts it cites. A sentence
     that fails is checked once more against its best-matching facts (the writer
     can cite the wrong ID: "I am currently pursuing an M.Eng ..." was cut for citing
@@ -798,8 +837,16 @@ def _cited_check(raw: str, ids: dict, call, profile: dict, fact_lines: list,
             # repair from the cited bullet, in the profile's own words
             # (a repeat of a line stated elsewhere is dropped later by the clean-up)
             fixed, line_used = "", ""
+            # never re-insert a fact the letter already states: "I wrote C++ code for
+            # the computation engine. I added one new feature ..." and then the
+            # repaired "There, I also wrote and debugged C++/Python code, adding one
+            # new feature ..." said it twice (Fraunhofer, 2026-10-19)
+            stated = {w for e in entries + [keep] for _s, ws in e for w in ws}
             for i in sorted(cited):
                 line = ids.get(i, "")
+                if line and line in stated:
+                    why += "; your profile's line for it is already in the letter"
+                    break
                 if line and line not in used and _fact_sentence(line, profile):
                     fixed, line_used = _fact_sentence(line, profile), line
                     used.add(line)
@@ -819,8 +866,12 @@ def _cited_check(raw: str, ids: dict, call, profile: dict, fact_lines: list,
     # Most relevant first: a requirement's proof counts most, then each requirement
     # word the fact contains. "Proof only" ranked the ANSYS bullet over the C++/Python
     # code bullet for a software role whose C++ proof was the skills line (Ubica,
-    # 2026-10-04). Stable: ties keep the writer's order.
-    order.sort(key=lambda w: -(3 * (w in proven) + len(checks._content_stems(w) & req_stems)))
+    # 2026-10-04). The job title's words count double: for "LiDAR Sensors Integration
+    # on a Drone Swarm" the ANSYS bullet (one word in common with the requirements,
+    # "simulation") beat the UAV project, which the title is about (DLR, 2026-10-11).
+    # Stable: ties keep the writer's order.
+    order.sort(key=lambda w: -(3 * (w in proven) + len(_relevance_stems(w) & req_stems)
+                               + 2 * len(_relevance_stems(w) & title_stems)))
     chosen = set(order[:MAX_WORK_FACTS])
     out, prev_place, prev_work, said = [], "", "", set()
     for keep in entries:
@@ -834,6 +885,15 @@ def _cited_check(raw: str, ids: dict, call, profile: dict, fact_lines: list,
             # opening a paragraph: "This" points at the wrong work (ZEISS, 2026-10-04,
             # the ANSYS result after a UAV sentence). Say the whole fact instead, or
             # drop it when that fact is in the letter already.
+            # "This work used Solidworks and FreeCAD for modeling." after the Robotics
+            # Lab example: it cited the skills line, so every check passed, but it puts
+            # those tools into work whose fact never names them (Fraunhofer, 2026-10-19)
+            if not work and prev_work and _ANAPHOR.match(s):
+                extra = _added_tools(s, [prev_work], profile)
+                if extra:
+                    removed.append(f"{s} (attaches {', '.join(extra)} to the example before it, "
+                                   "which does not mention them)")
+                    continue
             if work and _ANAPHOR.match(s) and (not k or work[0] != prev_work):
                 whole = _fact_sentence(work[0], profile)
                 if whole and work[0] not in said:
@@ -933,7 +993,10 @@ def _add_studies(letter: str, profile: dict) -> str:
     current = next((ed for ed in profile.get("education") or []
                     if (ed.get("status") or "").lower() == "in progress"), None)
     courses = [c for c in (current or {}).get("coursework") or [] if c.lower() not in flat]
-    if courses:
+    # one coursework sentence per letter: the letter's own "My M.Eng coursework
+    # includes Autonomous Systems." plus an added "My M.Eng coursework includes AR/VR
+    # ..." read as a repeat (ZEISS, 2026-10-12)
+    if courses and not re.search(r"\b(coursework|courses?|my studies (?:include|cover))\b", flat):
         degree = current["degree"].split(" ")[0]
         pairs = _in_pairs(courses)
         extra.append(f"My {degree} coursework includes {pairs[0]}."
@@ -1239,7 +1302,16 @@ def _complete_recruiter(text: str, profile: dict, requirements: list, role: str 
     a missing part in code: the intro from the profile, the evidence from a real
     bullet, the question from a plain template. (Bonsai once left only the
     question; always inserting evidence once repeated the manipulator bullet.)"""
-    parts = [s for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s.strip()]
+    parts = []
+    for s in (x for x in re.split(r"(?<=[.!?])\s+", text.strip()) if x.strip()):
+        # "I built X at the Robotics Lab What does the team do?" - a statement run
+        # into the question: two sentences (Fraunhofer, 2026-10-11)
+        q = prompts._just_question(s)
+        if q != s:
+            parts += [s[:len(s) - len(q)].rstrip() + ".", q]
+        else:
+            parts.append(s)
+    text = " ".join(parts)
     plain = lambda t: re.sub(r"\s+", " ", re.sub(r"\([^)]*\)", " ", t)).strip().lower()
     if len(parts) == 3 and parts[2].endswith("?") \
             and re.search(r"\b(i|i'm|i am|my)\b", parts[0], re.I) \
@@ -1812,9 +1884,18 @@ def _tidy_letter(text: str, profile: dict, role: str = "", ad: str = "",
             sents.append(re.sub(r"\s@\s", " at ", s))
             prev = s
         if sents:
+            # what the candidate wants to learn comes after what they did: a repaired
+            # fact sentence took the place of the cut one and landed after "I am keen
+            # to learn LiDAR data processing." (Fraunhofer, 2026-10-19)
+            sents = ([x for x in sents if not _KEEN_TO_LEARN.search(x)]
+                     + [x for x in sents if _KEEN_TO_LEARN.search(x)])
             out.append(" ".join(sents))
             kept += len(sents)
     return _place_flow("\n\n".join(out), profile) if kept >= 3 else text
+
+
+_KEEN_TO_LEARN = re.compile(r"\b(?:keen|eager|happy|excited|motivated)\s+to\s+(?:learn|deepen|gain)\b"
+                            r"|\blook(?:ing)?\s+forward\s+to\s+learning\b", re.I)
 
 
 def _with_article(text: str, profile: dict) -> str:
@@ -1873,6 +1954,13 @@ def _place_flow(text: str, profile: dict) -> str:
                     if not re.match(r"(?:an?|the)\s", title, re.I):
                         title = ("an " if title[0].lower() in "aeiou" else "a ") + title
                     s = f"I {body[:-1]} as {title} at {at(org)}{body[-1]}"
+                # the same place again at the end of the same sentence: "At the
+                # Robotics Lab, Technische Hochschule Deggendorf, I also built ... at
+                # Technische Hochschule Deggendorf." (ZEISS, 2026-10-12)
+                if s.startswith(("At ", "There, ", "I also ", "As ")):
+                    pieces = [org] + [p.strip() for p in org.split(",") if len(p.split()) >= 2]
+                    s = re.sub(rf",?\s+(?:at|in)\s+(?:the\s+)?(?:{'|'.join(map(re.escape, pieces))})"
+                               r"(?=[.!?]$)", "", s)
             # The place said again at the end: "... while working as a Student
             # Assistant (SHK) at the Robotics Lab ..." twice in a row, or "In that
             # role, ... during my time at the same lab" (NXP, sewts 2026-10-04).
@@ -1957,7 +2045,9 @@ def _true_names(text: str, profile: dict) -> str:
         if not re.search(r"\b(Hochschule|Universität|Fachhochschule|Technische|Akademie)\b", name):
             continue
         city = re.escape(name.split()[-1])
-        kinds = (r"(?:Technical|Technological|Applied Sciences?)\s+(?:University|College|Institute)|"
+        # half-translated too: "Technical Hochschule Deggendorf" (Fraunhofer, 2026-10-19)
+        kinds = (r"(?:Technical|Technological|Technische|Applied Sciences?)\s+"
+                 r"(?:University|College|Institute|Hochschule)|"
                  r"University of Applied Sciences|Institute of Technology|Technical Institute|"
                  r"Technical School|University")
         text = re.sub(rf"\b(?:the\s+)?(?:{kinds})(?:\s+of)?\s+{city}\b", name, text or "")
@@ -1977,9 +2067,13 @@ def _true_role(text: str, role: str) -> str:
         w = m.group(0)
         for t in words:
             # same length, same first letter, one or two letters swapped - never a
-            # case change or a plural ("testing" stays, "manipulator" stays)
-            if len(t) == len(w) and t[0].lower() == w[0].lower() and t.lower() != w.lower() \
-                    and sum(a != b for a, b in zip(t.lower(), w.lower())) <= (1 if len(w) < 9 else 2):
+            # case change or a plural ("testing" stays, "manipulator" stays), and never
+            # another form of the word: "integrating" was turned back into the title's
+            # "Integration" (they differ only in the ending), undoing the recruiter
+            # question fix (DLR LiDAR, 2026-10-11)
+            diff = [i for i, (a, b) in enumerate(zip(t.lower(), w.lower())) if a != b]
+            if len(t) == len(w) and t[0].lower() == w[0].lower() and diff \
+                    and len(diff) <= (1 if len(w) < 9 else 2) and max(diff) < len(w) - 3:
                 return t
         return w
     return re.sub(r"[A-Za-zÄÖÜäöüß]{6,}", fix, text or "")
@@ -2337,29 +2431,93 @@ def write_texts(profile, job_description, lang, gaps, recruiter, call, log, forb
     # The letter writer sees the facts with IDs and cites them per sentence; each
     # sentence is then checked against its own cited facts (_cited_check).
     numbered, fact_ids = _numbered_facts(facts)
-    # The recruiter message is not cited: the same facts without IDs, so no "[F7]"
-    # can end up in it.
-    recruiter_facts = "\n".join(f"- {v}" for v in fact_ids.values())
+    # The recruiter message gets the same numbered facts, so its prompt starts exactly
+    # like the letter's (prompt cache); it is told not to cite, and join_recruiter
+    # removes any "[F7]" anyway.
     fact_lines = [l.lstrip("- ") for l in facts.splitlines() if l.strip()]
 
     # Facts that prove a job requirement: kept first when the letter has too many.
     proven = {e for r in requirements if r.get("status") == "have" for e in r.get("evidence") or []}
-    req_stems = checks._content_stems(" ".join(f"{r.get('skill', '')} {r.get('quote', '')}"
-                                               for r in requirements))
+    req_stems = _relevance_stems(" ".join(f"{r.get('skill', '')} {r.get('quote', '')}"
+                                          for r in requirements))
+    # the job title's own words (without "Working Student", "(f/m/x)" ...) rank facts too
+    title_stems = _relevance_stems(re.sub(r"\(.*?\)", " ", _unprotect(meta.get("role", "")))) - \
+        _relevance_stems("working student werkstudent intern internship praktikum thesis "
+                         "masterarbeit abschlussarbeit studentische hilfskraft assistant junior "
+                         # job-title words that also sit in every profile job's own title
+                         "engineer engineering ingenieur stud mittels systems")
 
     def uncite(field: str, raw: str) -> tuple[str, list]:
         if field != "cover_letter":
             return raw, []
-        return _cited_check(raw, fact_ids, call, profile, fact_lines, log, proven, req_stems)
+        return _cited_check(raw, fact_ids, call, profile, fact_lines, log, proven, req_stems,
+                            title_stems)
 
+    company = (meta or {}).get("company", "")
+
+    def finish_recruiter(text: str) -> str:
+        """Intro, one real bullet and a question, completed in code where missing."""
+        text = _tidy_recruiter(_intro_stop(text or "", company), profile)
+        text = _complete_recruiter(text or "", profile, list(requirements), (meta or {}).get("role", ""))
+        text = checks.fix_recruiter_question(text)
+        text = _with_article(_at_word(_role_phrase(text, company)), profile)
+        # "As a Student Assistant (SHK) at Robotics Lab, Technische Hochschule
+        # Deggendorf I built ..." - the comma before "I" (Fraunhofer, 2026-10-19)
+        orgs = "|".join(re.escape(e["employer"]) for e in profile.get("experience") or []
+                        if e.get("employer"))
+        if orgs:
+            text = re.sub(rf"(\bAs an? [^.]*? at (?:the )?(?:{orgs}))\s+(?=I\s)", r"\1, ", text)
+        return text
+
+    def mend(field: str, text: str, problems: list) -> tuple[str, list]:
+        """Free repairs in code, no model call. Cover letter: the true opening and
+        closing, then paragraphs and the candidate's own studies and languages.
+        Recruiter message: the text is kept as it is (it is finished later), with the
+        problems its finished form would still have."""
+        if not problems or not (text or "").strip():
+            return text, problems
+        if field == "recruiter_message":
+            done = finish_recruiter(text)
+            return text, check(done) + checks.gap_claims(done, forbidden)
+        # Add the true opening and closing BEFORE judging the length: 7 checked body
+        # sentences were thrown away as "too short" when the opening and close, added
+        # later, would have made a full letter. The model's own text must still carry
+        # the letter (3+ sentences, 70+ words).
+        own = [s for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+        if len(own) >= 3 and len(text.split()) >= 70:
+            framed = _frame_letter(text, profile, meta or checks.parse_header(job_description), log)
+            framed_problems = check(framed) + checks.gap_claims(framed, forbidden)
+            if len(framed_problems) < len(problems):
+                text, problems = framed, framed_problems
+        if lang == "en" and problems and all(p.startswith("cover letter has") for p in problems):
+            # True but in one block or a little short: give it paragraphs and the
+            # candidate's own unused bullets before throwing it away (DLR: a true
+            # 137-word, one-paragraph draft went to the profile fallback, 2026-10-04).
+            # Studies and languages first: a draft that already has its four work
+            # examples cannot take more (Magazino: 106 true words, 2026-10-04).
+            mended = _add_studies(_reparagraph(text), profile)
+            again = check(mended) + checks.gap_claims(mended, forbidden)
+            if any(p.startswith("cover letter has") for p in again):
+                mended = _top_up(mended, profile, list(requirements))
+                again = check(mended) + checks.gap_claims(mended, forbidden)
+            if not any(p.startswith("cover letter has") for p in again):
+                log("The cover letter was one block or a little short; split it into "
+                    "paragraphs and added your own unused profile lines.")
+                text, problems = mended, again
+        return text, problems
+
+    # The recruiter message first: its prompt shares the letter's opening, so the
+    # letter's drafts then find it in LM Studio's prompt cache. Written after the
+    # letter, it came after the style revision, whose different prompt had replaced
+    # the cache, and took 100-115 s instead of ~20 s (2026-10-11).
     for field, make, check, schema in (
-            ("cover_letter",
-             lambda: prompts.cover_only_prompt(profile, brief, lang, gaps, numbered, cited=True),
-             checks.letter_problems, None),
             ("recruiter_message",
              lambda: prompts.recruiter_only_prompt(profile, brief, lang, recruiter,
-                                                   facts=recruiter_facts),
-             checks.recruiter_problems, prompts.RECRUITER_SCHEMA)):
+                                                   facts=numbered),
+             checks.recruiter_problems, prompts.RECRUITER_SCHEMA),
+            ("cover_letter",
+             lambda: prompts.cover_only_prompt(profile, brief, lang, gaps, numbered, cited=True),
+             checks.letter_problems, None)):
         best, best_problems, drafts, built = None, [], [], False
         cite_removed = []
         multi = field == "cover_letter" and drafters and len(drafters) > 1
@@ -2370,6 +2528,11 @@ def write_texts(profile, job_description, lang, gaps, recruiter, call, log, forb
             text = prompts.join_recruiter(raw) if schema else raw
             text, cut_here = uncite(field, text)
             problems = check(text) + checks.gap_claims(text, forbidden)
+            # The free repairs before a second draft: in every run of 2026-10-11 the
+            # citation check cut 1-4 sentences, the letter was then "too short", and
+            # the 27B wrote a whole new draft (70-150 s) that adding the opening or
+            # the studies would have made unnecessary.
+            text, problems = mend(field, text, problems)
             if best is None or len(problems) < len(best_problems):
                 best, best_problems, cite_removed = text, problems, cut_here
             if not problems:
@@ -2392,6 +2555,11 @@ def write_texts(profile, job_description, lang, gaps, recruiter, call, log, forb
         removed_all += [f"{field.replace('_', ' ')}: {r}" for r in removed]
         if removed:
             best_problems = check(best) + checks.gap_claims(best, forbidden)
+        # The free repairs (code only) before any rewrite by the writer model: the
+        # rewrite ran first and cost a 27B call plus a second fact-check, in 13 of 47
+        # runs, also when adding the opening or the studies would have been enough
+        # (2026-10-11).
+        best, best_problems = mend(field, best, best_problems)
         if removed and best_problems:
             # Too short after deleting unsupported claims: one rewrite that is told
             # exactly which claims not to make, then fact-checked again.
@@ -2410,37 +2578,11 @@ def write_texts(profile, job_description, lang, gaps, recruiter, call, log, forb
             except FactCheckFailed:
                 log("The rewrite could not be fact-checked; keeping the checked first draft.")
                 text, removed2, problems2 = "", [], None
+            if problems2 is not None:
+                text, problems2 = mend(field, text, problems2)
             if problems2 is not None and len(problems2) <= len(best_problems):
                 best, best_problems = text, problems2
                 removed_all += [f"{field.replace('_', ' ')} (rewrite): {r}" for r in removed2]
-        if field == "cover_letter" and best and best_problems:
-            # Add the true opening and closing BEFORE judging the length: 7 checked
-            # body sentences were thrown away as "too short" when the opening and
-            # close, added later, would have made a full letter. The model's own
-            # text must still carry the letter (3+ sentences, 70+ words).
-            own = [s for s in re.split(r"(?<=[.!?])\s+", best) if s.strip()]
-            if len(own) >= 3 and len(best.split()) >= 70:
-                framed = _frame_letter(best, profile, meta or checks.parse_header(job_description),
-                                       log)
-                framed_problems = check(framed) + checks.gap_claims(framed, forbidden)
-                if len(framed_problems) < len(best_problems):
-                    best, best_problems = framed, framed_problems
-        if field == "cover_letter" and lang == "en" and (best or "").strip() and best_problems \
-                and all(p.startswith("cover letter has") for p in best_problems):
-            # True but in one block or a little short: give it paragraphs and the
-            # candidate's own unused bullets before throwing it away (DLR: a true
-            # 137-word, one-paragraph draft went to the profile fallback, 2026-10-04).
-            # Studies and languages first: a draft that already has its four work
-            # examples cannot take more (Magazino: 106 true words, 2026-10-04).
-            mended = _add_studies(_reparagraph(best), profile)
-            again = check(mended) + checks.gap_claims(mended, forbidden)
-            if any(p.startswith("cover letter has") for p in again):
-                mended = _top_up(mended, profile, list(requirements))
-                again = check(mended) + checks.gap_claims(mended, forbidden)
-            if not any(p.startswith("cover letter has") for p in again):
-                log("The cover letter was one block or a little short; split it into "
-                    "paragraphs and added your own unused profile lines.")
-                best, best_problems = mended, again
         if field == "cover_letter" and lang == "en" and (
                 not (best or "").strip() or any(p.startswith("cover letter has")
                                                 for p in best_problems)):
@@ -2464,12 +2606,7 @@ def write_texts(profile, job_description, lang, gaps, recruiter, call, log, forb
                               "personalise it before sending")
         if field == "recruiter_message":
             # also when nothing usable is left: intro, a real bullet and a question
-            company = (meta or {}).get("company", "")
-            best = _tidy_recruiter(_intro_stop(best or "", company), profile)
-            best = _complete_recruiter(best or "", profile, list(requirements),
-                                       (meta or {}).get("role", ""))
-            best = checks.fix_recruiter_question(best)
-            best = _with_article(_at_word(_role_phrase(best, company)), profile)
+            best = finish_recruiter(best)
             best_problems = check(best) + checks.gap_claims(best, forbidden)
         if field == "cover_letter" and best and not built:
             best = _style_pass(best, drafts, facts, call, log, profile, forbidden,
@@ -2490,14 +2627,26 @@ def write_texts(profile, job_description, lang, gaps, recruiter, call, log, forb
             kept_flat = re.sub(r"\s+", " ", best or "")
             # Reworded is not removed: "As a Student Assistant ... I coordinated ..."
             # became "I also coordinated ..." and was listed as removed (2026-10-04).
+            # Place names do not count either: "I automated workflows in ANSYS ... at
+            # SOCO Engineers GmbH." kept as "I also automated workflows in ANSYS ..."
+            # was listed as removed (Fraunhofer, 2026-10-19).
+            places = checks._content_stems(" ".join(
+                [f"{e.get('title', '')} {e.get('employer', '')}" for e in profile.get("experience") or []]
+                + [p.get("name", "") for p in profile.get("projects") or []]
+                + [ed.get("institution", "") for ed in profile.get("education") or []]))
+
             def core(s):        # without its "As a <title> at <place>, " opener
-                return checks._content_stems(re.sub(r"^[^.]*?,\s+(?=I\s)", "", s))
+                return checks._content_stems(re.sub(r"^[^.]*?,\s+(?=I\s)", "", s)) - places
             kept_stems = [core(k) for k in re.split(r"(?<=[.!?])\s+", kept_flat) if k.strip()]
 
             def still_there(s):
                 own = core(s)
-                return re.sub(r"\s+", " ", s) in kept_flat or (
-                    own and any(len(own & k) >= 0.8 * len(own) for k in kept_stems))
+                # reworded, or kept in a shortened form ("In that role, I coordinated
+                # ... navigation during my time at the same lab" kept without the
+                # tail was listed as removed, Rheinmetall 2026-10-12)
+                return re.sub(r"\s+", " ", s) in kept_flat or bool(own) and any(
+                    len(own & k) >= 0.8 * len(own)
+                    or (len(k) >= 5 and len(own & k) >= 0.8 * len(k)) for k in kept_stems)
             results["cleanup_removed"] = [
                 s for s in (x.strip() for x in re.split(r"(?<=[.!?])\s+", before_tidy or ""))
                 if s and not still_there(s)]
@@ -2568,6 +2717,10 @@ def _sentence_logprobs(text: str, drafts: list) -> dict:
     return out
 
 
+# The style revision runs only when the letter reads more machine-like than this.
+STYLE_PASS_ABOVE = 50
+
+
 def _style_pass(text, drafts, facts, call, log, profile, forbidden, known, check, write=None):
     """One rewrite of a fact-checked letter for style only (the "write like a
     human" rules), kept only if it passes the fact-check without losing anything,
@@ -2576,6 +2729,11 @@ def _style_pass(text, drafts, facts, call, log, profile, forbidden, known, check
     lps = _sentence_logprobs(text, drafts)
     before = checks.predictability(text, lps)
     if not problems and before["label"] == "low":
+        return text
+    if before["score"] <= STYLE_PASS_ABOVE:
+        # It was never kept for letters scoring 36-46 (3 of 3 dropped, 2026-10-11)
+        # and costs a 27B call plus a full fact-check.
+        log(f"Wording check: predictability {before['score']}/100 - no style revision needed.")
         return text
     flat = sorted(lps.items(), key=lambda kv: -sum(kv[1]) / len(kv[1]))[:2]
     predictable = [s for s, lp in flat if 2.718281828 ** (-sum(lp) / len(lp)) < 2.5]
@@ -2857,9 +3015,13 @@ def prepare(job_description: str, region_code: str, profile_path: Path = None,
 
     def call(prompt, max_tokens=max_tokens, schema=None, temperature=0.3, logprobs=False,
              use_model=None):
-        return call_model(prompt, model=use_model or model, api_key=api_key, backend=backend,
-                          base_url=base_url, max_tokens=max_tokens, schema=schema,
-                          temperature=temperature, logprobs=logprobs)
+        def ask():
+            return call_model(prompt, model=use_model or model, api_key=api_key, backend=backend,
+                              base_url=base_url, max_tokens=max_tokens, schema=schema,
+                              temperature=temperature, logprobs=logprobs)
+        if isinstance(log, _RunLog):            # timed for run_log.txt
+            return log.timed(ask, prompt, use_model or model, schema)
+        return ask()
 
     for w in hard:
         log(f"Watch out: {w}.")
@@ -2886,6 +3048,77 @@ def prepare(job_description: str, region_code: str, profile_path: Path = None,
             "drafters": drafters}
 
 
+class _RunLog:
+    """The run's own log with timings, saved as run_log.txt next to its outputs: what
+    each step and each model call cost. Nothing was kept before, so the time a run
+    spent per model and per step could not be measured (2026-10-11). Time spent
+    waiting for the plan review is not counted."""
+
+    _STEPS = ((prompts.REQUIREMENTS_SCHEMA, "requirements"), (prompts.IDENTITY_SCHEMA, "job title"),
+              (prompts.EVIDENCE_SCHEMA, "evidence"), (prompts.EXPAND_SCHEMA, "requirement terms"),
+              (prompts.VERIFY_SCHEMA, "requirement check"), (prompts.FACTCHECK_SCHEMA, "letter fact-check"),
+              (prompts.ENTAIL_SCHEMA, "sentence check"), (prompts.RECRUITER_SCHEMA, "recruiter draft"))
+
+    def __init__(self, log):
+        self._log, self.start, self.paused = log, time.monotonic(), 0.0
+        self.lines, self.calls = [], []
+
+    def elapsed(self) -> float:
+        return time.monotonic() - self.start - self.paused
+
+    def __call__(self, msg) -> None:
+        self.lines.append((self.elapsed(), str(msg)))
+        self._log(msg)
+
+    def step(self, prompt: str, schema) -> str:
+        for known, name in self._STEPS:
+            if schema is known:
+                return name
+        if "TASK: Revise the cover letter" in prompt:
+            return "style revision"
+        if "Do NOT write these unsupported claims" in prompt:
+            return "letter rewrite"
+        if "Lightly edit this CV bullet" in prompt:
+            return "CV bullet"
+        if "BODY of a cover letter" in prompt:
+            return "letter draft"
+        return "other"
+
+    def timed(self, fn, prompt, model, schema):
+        t = time.monotonic()
+        _USAGE.value = {}       # a failed call must not show the previous call's tokens
+        try:
+            return fn()
+        finally:
+            usage = getattr(_USAGE, "value", None) or {}
+            self.calls.append((self.step(prompt, schema), model, time.monotonic() - t,
+                               usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0)))
+
+    def summary(self) -> str:
+        by = {}
+        for step, model, sec, pin, pout in self.calls:
+            row = by.setdefault((model, step), [0, 0.0, 0, 0])
+            row[0] += 1; row[1] += sec; row[2] += pin; row[3] += pout
+        total = sum(r[1] for r in by.values())
+        out = [f"Run time {self.elapsed():.0f} s, of which model calls {total:.0f} s "
+               f"({len(self.calls)} calls)", "",
+               f"{'model':28} {'step':20} {'calls':>5} {'seconds':>8} {'prompt tok':>10} {'output tok':>10}"]
+        for (model, step), (n, sec, pin, pout) in sorted(by.items(), key=lambda kv: -kv[1][1]):
+            out.append(f"{model[:28]:28} {step:20} {n:5} {sec:8.1f} {pin:10} {pout:10}")
+        return "\n".join(out)
+
+    def short(self) -> str:
+        per = {}
+        for _s, model, sec, _i, _o in self.calls:
+            n, t = per.get(model, (0, 0.0))
+            per[model] = (n + 1, t + sec)
+        return "; ".join(f"{m}: {n} calls, {t:.0f} s" for m, (n, t) in per.items())
+
+    def text(self) -> str:
+        body = "\n".join(f"[{int(t // 60):02d}:{int(t % 60):02d}] {m}" for t, m in self.lines)
+        return self.summary() + "\n\n" + body + "\n"
+
+
 def run(job_description: str, region_code: str, profile_path: Path = None,
         outputs_root: Path = None, style: str = "both", recruiter: str = "",
         notes: str = "", model: str = DEFAULT_MODEL, compile_pdf: bool = False,
@@ -2899,10 +3132,13 @@ def run(job_description: str, region_code: str, profile_path: Path = None,
     may review the plan: return it (edited) to continue, or None to cancel.
     `notes` is extra truthful context for the cover letter.
     """
+    log = _RunLog(log)
     prepared = prepare(job_description, region_code, profile_path, recruiter, notes, model,
                        api_key, backend, base_url, max_tokens, log, writers)
     if approve is not None:
+        waited = time.monotonic()
         prepared = approve(prepared)
+        log.paused += time.monotonic() - waited      # your review time is not run time
         if prepared is None:
             raise PipelineError("Cancelled - nothing was written.")
     profile, reqs, lang = prepared["profile"], prepared["requirements"], prepared["lang"]
@@ -2978,4 +3214,9 @@ def run(job_description: str, region_code: str, profile_path: Path = None,
     out = write_outputs(pkg, prepared["region"], profile, outputs_root or ROOT / "outputs",
                         style=style, compile_pdf=compile_pdf)
     log(f"Written to: {out}")
+    log(f"Model time: {log.short()}; total {log.elapsed():.0f} s.")
+    try:
+        (Path(out) / "run_log.txt").write_text(_unprotect(log.text()), encoding="utf-8")
+    except OSError as e:
+        log(f"Could not save run_log.txt: {e}")
     return pkg, out
