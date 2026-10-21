@@ -353,7 +353,16 @@ def data_dir() -> Path:
         base = os.environ.get("APPDATA") or os.environ.get("XDG_DATA_HOME")
         if not base:
             base = str(Path.home() / ".local" / "share")
-        path = Path(base) / "EUJobSearch"
+        path = Path(base) / "JobsearchAssistant"
+        # The app was "EU Job Search" until 2026-10-21: its folder moves here once.
+        # Same drive, so a rename - nothing is copied. If it is in use (another copy
+        # of the old app running), the old folder stays in use for now.
+        old = Path(base) / "EUJobSearch"
+        if not path.exists() and old.exists():
+            try:
+                old.rename(path)
+            except OSError:
+                path = old
     else:
         path = Path(__file__).resolve().parent
     path.mkdir(parents=True, exist_ok=True)

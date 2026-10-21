@@ -1,6 +1,6 @@
 @echo off
 REM ===================================================================
-REM  build.bat - builds dist\EUJobSearch.exe from source on Windows.
+REM  build.bat - builds dist\JobsearchAssistant.exe from source on Windows.
 REM
 REM  Double-click it, or run from a terminal:
 REM      build.bat              normal build (pauses at the end)
@@ -27,7 +27,7 @@ for %%A in (%*) do (
 )
 
 echo.
-echo  === EU Job Search - Windows build ===
+echo  === Jobsearch Assistant - Windows build ===
 echo.
 
 REM ---- 1. Python ------------------------------------------------------
@@ -45,10 +45,10 @@ if errorlevel 1 (
 for /f "tokens=2" %%v in ('python --version 2^>^&1') do set "PYVER=%%v"
 echo  [1/7] Python !PYVER!
 
-REM ---- 2. Close a running copy (it locks dist\EUJobSearch.exe) ---------
-tasklist /FI "IMAGENAME eq EUJobSearch.exe" 2>nul | find /i "EUJobSearch.exe" >nul
+REM ---- 2. Close a running copy (it locks dist\JobsearchAssistant.exe) ---------
+tasklist /FI "IMAGENAME eq JobsearchAssistant.exe" 2>nul | find /i "JobsearchAssistant.exe" >nul
 if not errorlevel 1 (
-    echo  [X] EUJobSearch.exe is running. Close it and run the build again.
+    echo  [X] JobsearchAssistant.exe is running. Close it and run the build again.
     goto :fail
 )
 
@@ -105,34 +105,34 @@ for %%F in (*.py) do (
 echo  [5/7] Import check ...
 REM Imports every module the .exe bundles, so a missing dependency or a
 REM broken import fails here in seconds instead of inside the built .exe.
-set "JOBSEARCH_DATA_DIR=%TEMP%\EUJobSearch-buildcheck"
+set "JOBSEARCH_DATA_DIR=%TEMP%\JobsearchAssistant-buildcheck"
 "%PY%" -c "import job_gui, daily_sweep, fit_score, linkedin_jobs, eu_student_jobs, robotics_track, us_asia_jobs, jobspy_provider, ba_jobsuche, personio_jobs, workday_jobs, research_jobs, company_radar, system_checks, ats_pipeline, ats_checks, ats_plan, ats_embed, ats_latex, ats_prompts, ats_regions; from fit_score import load_default_scorer; assert load_default_scorer() is not None, 'profile.json missing or invalid'; print('       all modules import, profile.json OK')" || goto :fail
 set "JOBSEARCH_DATA_DIR="
 
 REM ---- 6. Build ----------------------------------------------------------
 echo  [6/7] Building the .exe (1-3 minutes) ...
 if exist "build" rmdir /s /q build
-if exist "dist\EUJobSearch.exe" del /q "dist\EUJobSearch.exe"
+if exist "dist\JobsearchAssistant.exe" del /q "dist\JobsearchAssistant.exe"
 "%PY%" -m PyInstaller jobsearch.spec --clean --noconfirm --log-level WARN || goto :fail
 
 REM ---- 7. Result ---------------------------------------------------------
-if not exist "dist\EUJobSearch.exe" (
-    echo  [X] PyInstaller finished but dist\EUJobSearch.exe was not produced.
+if not exist "dist\JobsearchAssistant.exe" (
+    echo  [X] PyInstaller finished but dist\JobsearchAssistant.exe was not produced.
     goto :fail
 )
-for %%A in ("dist\EUJobSearch.exe") do set /a "SIZE_MB=%%~zA / 1048576"
-echo  [7/7] Built dist\EUJobSearch.exe  (!SIZE_MB! MB)
+for %%A in ("dist\JobsearchAssistant.exe") do set /a "SIZE_MB=%%~zA / 1048576"
+echo  [7/7] Built dist\JobsearchAssistant.exe  (!SIZE_MB! MB)
 echo.
 echo  The .exe runs on any Windows PC without Python. Your data lives in
-echo      %%APPDATA%%\EUJobSearch   (jobs database, sweep settings)
+echo      %%APPDATA%%\JobsearchAssistant   (jobs database, sweep settings)
 echo  CVs and cover letters are written to ats_outputs\ in the project folder.
 echo  Your profile.json is read from the file you pick with Browse (remembered),
-echo  else %%APPDATA%%\EUJobSearch, else next to or one folder above the .exe.
+echo  else %%APPDATA%%\JobsearchAssistant, else next to or one folder above the .exe.
 echo.
 
 if defined NOPAUSE exit /b 0
 choice /C YN /M "  Launch it now"
-if not errorlevel 2 start "" "dist\EUJobSearch.exe"
+if not errorlevel 2 start "" "dist\JobsearchAssistant.exe"
 exit /b 0
 
 :fail

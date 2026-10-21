@@ -18,7 +18,7 @@ Run it:
     python daily_sweep.py --force         # run again today anyway
     python daily_sweep.py --install 09:00 # register a daily Windows task
     python daily_sweep.py --uninstall
-    EUJobSearch.exe --sweep               # same thing from the built .exe
+    JobsearchAssistant.exe --sweep               # same thing from the built .exe
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ CONFIG_PATH = data_dir() / "sweep_config.json"
 STATE_PATH = data_dir() / "sweep_state.json"
 LOG_PATH = data_dir() / "sweep.log"
 DB_PATH = data_dir() / "robotics_jobs.db"
-TASK_NAME = "EUJobSearch Daily Sweep"
+TASK_NAME = "Jobsearch Assistant Daily Sweep"
 
 DEFAULT_CONFIG = {
     "min_fit": 50,

@@ -55,7 +55,7 @@ Installed by `python install_jobspy.py`. The Windows `.exe` bundles these packag
 | pywin32-ctypes | 0.2.3 | BSD-3-Clause | https://github.com/enthought/pywin32-ctypes |
 | packaging | 26.3 | Apache-2.0 OR BSD-2-Clause | https://github.com/pypa/packaging |
 
-The PyInstaller bootloader exception allows the built `EUJobSearch.exe` to be
+The PyInstaller bootloader exception allows the built `JobsearchAssistant.exe` to be
 distributed under this project's license. The GPL does not extend to the app.
 
 ## Python runtime and standard library

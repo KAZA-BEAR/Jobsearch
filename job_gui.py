@@ -199,7 +199,7 @@ class Worker(threading.Thread):
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("EU Robotics & Mechatronics Job Search")
+        self.title("Jobsearch Assistant")
         self.geometry("1320x800")
         self.minsize(1000, 640)
 
@@ -380,8 +380,10 @@ class App(tk.Tk):
         side = tk.Frame(root, bg=self.SIDE, width=200)
         side.pack(side="left", fill="y")
         side.pack_propagate(False)
-        tk.Label(side, text="EU Job Search", bg=self.SIDE, fg="white", anchor="w",
-                 font=("Segoe UI Semibold", 14)).pack(fill="x", padx=18, pady=(20, 0))
+        # 13 pt: "Jobsearch Assistant" at 14 pt is 167 px, wider than the 164 px the
+        # 200 px sidebar leaves after its padding
+        tk.Label(side, text="Jobsearch Assistant", bg=self.SIDE, fg="white", anchor="w",
+                 font=("Segoe UI Semibold", 13)).pack(fill="x", padx=18, pady=(20, 0))
         tk.Label(side, text="Robotics · Mechatronics", bg=self.SIDE, fg=self.SIDE_DIM,
                  anchor="w").pack(fill="x", padx=18, pady=(0, 22))
         self._nav: dict[str, tk.Label] = {}
@@ -2073,7 +2075,7 @@ class App(tk.Tk):
         if not self._check_results:
             messagebox.showinfo("Nothing to copy", "Run the checks first.")
             return
-        lines = [f"EU Job Search checks, {datetime.now():%Y-%m-%d %H:%M}"]
+        lines = [f"Jobsearch Assistant checks, {datetime.now():%Y-%m-%d %H:%M}"]
         lines += [f"{r.status.upper():4}  {r.group:9}  {r.name}: {r.detail}"
                   for r in self._check_results.values()]
         self.clipboard_clear()
@@ -3419,13 +3421,13 @@ class App(tk.Tk):
 
 
 def ats_headless(argv: list) -> int:
-    """`EUJobSearch.exe --ats JOB.txt [--region DE]`: the CV tab's Generate
+    """`JobsearchAssistant.exe --ats JOB.txt [--region DE]`: the CV tab's Generate
     without the window, with the tab's defaults (both CV styles, cover letter,
     no PDF compile, plan accepted as proposed) and the tab's profile lookup.
     The .exe has no console, so the log also goes to ats_headless.log in the
     data folder."""
     import argparse
-    p = argparse.ArgumentParser(prog="EUJobSearch.exe --ats")
+    p = argparse.ArgumentParser(prog="JobsearchAssistant.exe --ats")
     p.add_argument("--ats", required=True, metavar="JOB_TEXT_FILE")
     p.add_argument("--region", default=DEFAULT_REGION)
     p.add_argument("--profile", default=None)
@@ -3484,7 +3486,7 @@ def _install_crash_log():
 
 
 if __name__ == "__main__":
-    # The Windows scheduled task runs "EUJobSearch.exe --sweep": do the daily
+    # The Windows scheduled task runs "JobsearchAssistant.exe --sweep": do the daily
     # sweep headless (no window) and exit.
     if "--sweep" in sys.argv:
         sys.exit(daily_sweep.headless(sys.argv[1:]))

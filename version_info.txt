@@ -16,12 +16,12 @@ VSVersionInfo(
       StringTable(
         '040904B0',
         [StringStruct('CompanyName', ''),
-         StringStruct('FileDescription', 'EU Robotics & Mechatronics Job Search'),
+         StringStruct('FileDescription', 'Jobsearch Assistant'),
          StringStruct('FileVersion', '1.0.0.0'),
-         StringStruct('InternalName', 'EUJobSearch'),
+         StringStruct('InternalName', 'JobsearchAssistant'),
          StringStruct('LegalCopyright', ''),
-         StringStruct('OriginalFilename', 'EUJobSearch.exe'),
-         StringStruct('ProductName', 'EU Job Search'),
+         StringStruct('OriginalFilename', 'JobsearchAssistant.exe'),
+         StringStruct('ProductName', 'Jobsearch Assistant'),
          StringStruct('ProductVersion', '1.0.0.0')])
     ]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])

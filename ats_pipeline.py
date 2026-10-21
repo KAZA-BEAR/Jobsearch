@@ -3105,7 +3105,7 @@ def write_outputs(pkg, region, profile, outputs_root: Path, style: str = "both",
 
 def assets_dir() -> Path:
     """Where profile_pic.png / sig.png live: the user's data folder first
-    (%APPDATA%\\EUJobSearch\\assets for the .exe), then next to the code."""
+    (%APPDATA%\\JobsearchAssistant\\assets for the .exe), then next to the code."""
     from linkedin_jobs import data_dir
     for d in (data_dir() / "assets", ROOT / "assets"):
         if d.is_dir():

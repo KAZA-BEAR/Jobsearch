@@ -70,7 +70,7 @@ REGIONS = ("germany", "dach", "europe", "anywhere")
 
 UA = "Mozilla/5.0 (compatible; jobsearch-discovery/1.0; personal job search)"
 # Wikimedia rejects browser-like agents; its policy asks for a bot name and a link.
-WIKI_UA = "EUJobSearch-discovery/1.0 (https://github.com/KAZA-BEAR/Jobsearch) python-requests"
+WIKI_UA = "JobsearchAssistant-discovery/1.0 (https://github.com/KAZA-BEAR/Jobsearch) python-requests"
 CACHE_NAME = "discovery_cache.json"
 
 # Roles worth keeping: the app's robotics / mechatronics words plus the

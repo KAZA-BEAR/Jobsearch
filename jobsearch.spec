@@ -1,11 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec for the EU Robotics & Mechatronics Job Search desktop app.
+PyInstaller spec for the Jobsearch Assistant desktop app.
 
 Build on Windows with:
     pyinstaller jobsearch.spec --clean --noconfirm
 
-Output: dist\\EUJobSearch.exe  (single file, no console window)
+Output: dist\\JobsearchAssistant.exe  (single file, no console window)
 """
 
 from PyInstaller.utils.hooks import collect_dynamic_libs
@@ -23,7 +23,7 @@ a = Analysis(
     pathex=['.'],
     binaries=tls_client_libs,
     # profile.json is bundled so fit scoring works out of the box; a copy in
-    # %APPDATA%\EUJobSearch takes precedence once you add one there.
+    # %APPDATA%\JobsearchAssistant takes precedence once you add one there.
     datas=[('profile.json', '.')] if __import__('os').path.exists('profile.json') else [],
     hiddenimports=[
         # Local modules imported indirectly through the GUI
@@ -93,7 +93,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='EUJobSearch',
+    name='JobsearchAssistant',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -1,4 +1,4 @@
-# EU Robotics & Mechatronics Job Search
+# Jobsearch Assistant
 
 A Windows desktop app for finding robotics, mechatronics and engineering jobs across
 Europe, the US and Asia-Pacific, ranking them against your own profile,
@@ -27,6 +27,7 @@ and by deterministic code checks before it reaches a document.
 - [Project structure](#project-structure)
 - [Troubleshooting](#troubleshooting)
 - [Privacy](#privacy)
+- [Recent changes](#recent-changes)
 - [License](#license)
 
 ---
@@ -44,7 +45,7 @@ and by deterministic code checks before it reaches a document.
 | Employer ATS boards | Greenhouse, Lever, SmartRecruiters, Ashby, Recruitee, Workday, Personio |
 | Research & new employers | Fraunhofer, DLR, Max Planck, TH Deggendorf feeds, plus open-ended discovery: thousands of startup and company job boards from Common Crawl's public index, career pages of research institutes and engineering companies (Wikidata), Y Combinator startups and Hacker News "Who is hiring?" (`discover_jobs.py`) |
 | New companies | Funding signals and new employers per market (`company_radar.py`) |
-| LinkedIn / Indeed (optional) | via `python-jobspy` (free, no key) |
+| LinkedIn / Indeed (optional) | via `python-jobspy` (free, no key), with each LinkedIn posting's full description |
 | US / Asia | USAJOBS and Adzuna (free keys), MyCareersFuture (Singapore), employer ATS boards |
 
 **Ranking and tracking**
@@ -94,7 +95,7 @@ build.bat
 ```
 
 `build.bat` creates a `.venv`, installs the dependencies, compiles and import-checks
-every module, and builds `dist\EUJobSearch.exe` with PyInstaller. Flags:
+every module, and builds `dist\JobsearchAssistant.exe` with PyInstaller. Flags:
 
 | Flag | Effect |
 |---|---|
@@ -154,9 +155,9 @@ embedding model loads on first use. Ollama **0.30.2 or newer** is needed for Bon
 `--model` / `--writer`.
 
 Notes from testing on an RTX 3050 (6 GB):
-- One job takes about **2½–3½ minutes** with Ollama (154 s and 192 s on 2026-10-21;
-  140–340 s with LM Studio before), most of it the judge's fact-checks and the 27B
-  writer's two drafts (26–37 s each). Each run's `run_log.txt` shows where the time went.
+- One job takes about **2–3½ minutes** with Ollama (126–201 s over six jobs on
+  2026-10-21; 140–340 s with LM Studio before), most of it the judge's fact-checks and
+  the 27B writer's two drafts (25–42 s each). Each run's `run_log.txt` shows where the time went.
 - The judge (3.6 GB with its context) and the writer (4.9 GB, about a quarter of it in
   system memory) do not fit on a 6 GB GPU together, so Ollama swaps them: about 5 s to
   bring back the judge and 7 s for the writer each time, already included above.
@@ -226,7 +227,7 @@ Tips:
   them into first-person sentences ("I am an aspiring…", "My bachelor's degree is in…").
 
 **Where the app looks for it**, in this order: the file you last picked with
-**Browse…** (remembered) → `%APPDATA%\EUJobSearch\profile.json` → next to the `.exe` or
+**Browse…** (remembered) → `%APPDATA%\JobsearchAssistant\profile.json` → next to the `.exe` or
 one folder above it → the copy bundled into the `.exe` (last resort; the log warns).
 
 ---
@@ -338,16 +339,16 @@ The checks change nothing: no jobs are stored and no models are loaded.
 
 ```bash
 # CV + letter for one job, headless (same pipeline and defaults as the Generate button)
-EUJobSearch.exe --ats job.txt --region DE
+JobsearchAssistant.exe --ats job.txt --region DE
 # other models: --model is the judge, --writer writes the letter
-EUJobSearch.exe --ats job.txt --model "qwen3:4b-instruct-2507-q4_K_M" --writer "llama3.2:3b"
+JobsearchAssistant.exe --ats job.txt --model "qwen3:4b-instruct-2507-q4_K_M" --writer "llama3.2:3b"
 
 # Daily sweep (what the scheduled Windows task runs)
-EUJobSearch.exe --sweep
+JobsearchAssistant.exe --sweep
 ```
 
 From source, the same with `python job_gui.py --ats job.txt`. `--ats` writes its log to
-`%APPDATA%\EUJobSearch\ats_headless.log`.
+`%APPDATA%\JobsearchAssistant\ats_headless.log`.
 
 ```bash
 python daily_sweep.py --force              # ignore the once-per-day limit
@@ -480,14 +481,15 @@ folder is in `.gitignore`.
 | Notes | e.g. how many sentences the fact-check changed |
 
 For a signature and photo, put `sig.png` and `profile_pic.png` in
-`%APPDATA%\EUJobSearch\assets\` (the photo is used only where the region expects one).
+`%APPDATA%\JobsearchAssistant\assets\` (the photo is used only where the region expects one).
 
 ---
 
 ## Configuration
 
-**Data folder:** `%APPDATA%\EUJobSearch` for the `.exe`; the project folder when run from
-source. Contains the job database (`robotics_jobs.db`), `company_radar.db`,
+**Data folder:** `%APPDATA%\JobsearchAssistant` for the `.exe`; the project folder when run from
+source. (The app was called *EU Job Search* until October 2026; on its first start the
+new version moves an existing `%APPDATA%\EUJobSearch` folder here.) Contains the job database (`robotics_jobs.db`), `company_radar.db`,
 `sweep_config.json`, `sweep_state.json`, `settings.json` (remembered profile path, API
 keys, SEC contact email, discovery options), `embed_cache.json`, `discovery_cache.json`
 and `crash.log` (each start and normal close, and the traceback of any error, since the
@@ -546,12 +548,12 @@ Generated CVs and letters go to `ats_outputs\` in the project folder instead (se
 | "Could not reach http://localhost:1234/v1" | an old LM Studio setting: remove the `ATS_BASE_URL` and `ATS_BACKEND` environment variables, or set the Settings → *Server* field to `http://localhost:11434` |
 | "Not downloaded in Ollama: …" | run the `ollama pull …` command it names |
 | A model loads but is extremely slow | it is probably a Qwen3.5-architecture model at a normal quantisation — use the defaults |
-| A job takes several minutes | 2½–3½ minutes is normal with the 27B writer on a 6 GB GPU; `run_log.txt` in the output folder lists every model call with its time. A smaller writer is faster but its letters lose more to the fact-check |
+| A job takes several minutes | 2–3½ minutes is normal with the 27B writer on a 6 GB GPU; `run_log.txt` in the output folder lists every model call with its time. A smaller writer is faster but its letters lose more to the fact-check |
 | "answer ran past its … token limit" | raise the model's context in `MODEL_CONTEXT` (`ats_pipeline.py`) to 8k+ |
 | Cover letter "assembled from profile.json" | the writer's draft lost too much to the fact-check; `report.md` shows the draft and the reason. The letter is true but plain — personalise it |
 | "no cover letter: none of the required skills are in your profile" | intentional: the CV is still written; a letter would have nothing relevant to say |
 | No PDFs | install MiKTeX/TeX Live and tick *Compile PDF*; missing packages install on first use |
-| "EUJobSearch.exe is running" during build | close the app first |
+| "JobsearchAssistant.exe is running" during build | close the app first |
 | The app closed by itself | read `crash.log` in the data folder: a traceback means an error (report it); "started" with no "closed normally" means the process was ended from outside |
 | "database disk image is malformed" | close the app and restore `robotics_jobs.db` from a backup copy. Run only one copy of the app at a time: two copies writing the same database can damage it |
 
@@ -566,6 +568,28 @@ in Ollama on your machine. Nothing from your profile is sent to an online AI ser
 The included `.gitignore` already excludes `profile.json` and its backups, generated
 PDFs and outputs, the local databases and caches, and the build folders. Share a
 placeholder profile such as the example above instead of your real one.
+
+---
+
+## Recent changes
+
+**October 2026**
+- **Renamed** from *EU Job Search* to **Jobsearch Assistant** (it covers Europe, the US and
+  Asia-Pacific): `JobsearchAssistant.exe`, data in `%APPDATA%\JobsearchAssistant` (an old
+  `%APPDATA%\EUJobSearch` folder is moved there on first start).
+- **Ollama instead of LM Studio** for the local models: its own API with the context set
+  per request, thinking switched off, a clear stop when a model is not downloaded, and
+  health checks for the Ollama program, server version and models. See
+  [Local models (Ollama)](#local-models-ollama).
+- **Full job descriptions** from LinkedIn, MyCareersFuture, SmartRecruiters, Max Planck,
+  German-only Personio ads, Lever and Workday, where search results carried only a title
+  or a teaser (see [Using the app](#using-the-app)).
+- **Letter wording checks**: the job title gets "position" only when it does not already
+  say what it is, without its gender tag; courses come from the degree that matches the
+  job; "at <your job title> at …" becomes "as a <job title> at the …"; recruiter messages
+  do not open two sentences in a row with "I".
+- **`crash.log`** in the data folder records each start, normal close and any error, since
+  the `.exe` has no console.
 
 ---
 
