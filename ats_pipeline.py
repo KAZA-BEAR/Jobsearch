@@ -3,12 +3,12 @@ ats_pipeline.py — run the whole CV / cover-letter tailoring pipeline for one j
 
 Tailor a CV to one job.
 
-The CV is assembled from profile.json in code; the model (LM Studio by default)
+The CV is assembled from profile.json in code; the model (Ollama by default)
 only rewords the work-experience bullets toward the job's keywords, and writes
 an optional cover letter and recruiter message. Each request is ~2k tokens.
 
-Models: "judge,drafter,..." (default Qwen3-4B + Llama 3.2 3B, loaded in LM Studio
-automatically with a fixed context). The first model judges - requirements,
+Models: "judge,drafter,..." (default Qwen3-4B judge + Bonsai 27B writer, run in
+Ollama with a fixed context). The first model judges - requirements,
 fact-check, bullets, recruiter message; every listed model drafts the cover
 letter in parallel. Every draft is fact-checked by the model AND by the code
 checks in ats_checks; drafts are merged in code; if too little true text is left,
@@ -38,11 +38,11 @@ import ats_plan as planning
 import ats_prompts as prompts
 from ats_regions import get_region
 
-DEFAULT_BACKEND = os.environ.get("ATS_BACKEND", "lmstudio")
-DEFAULT_MODEL = os.environ.get("ATS_MODEL", "")          # LM Studio: use whatever is loaded
-# LM Studio's local server, and any other OpenAI-compatible server (Ollama, vLLM,
-# llama.cpp, LocalAI) - point ATS_BASE_URL at it.
-DEFAULT_BASE_URL = os.environ.get("ATS_BASE_URL", "http://localhost:1234/v1")
+# "ollama" (its own API), or "openai" for any other OpenAI-compatible server
+# (vLLM, llama.cpp, LocalAI) - point ATS_BASE_URL at it, ending in /v1.
+DEFAULT_BACKEND = os.environ.get("ATS_BACKEND", "ollama")
+DEFAULT_MODEL = os.environ.get("ATS_MODEL", "")          # empty: the first downloaded model
+DEFAULT_BASE_URL = os.environ.get("ATS_BASE_URL", "http://localhost:11434")
 ROOT = Path(__file__).resolve().parent   # flat layout: all files in one folder
 
 
@@ -68,7 +68,7 @@ def _post(url: str, payload: dict, headers: dict, timeout: int) -> dict:
         except urllib.error.HTTPError as e:
             raise PipelineError(f"API error {e.code}: {e.read().decode('utf-8', 'replace')[:800]}")
         except (urllib.error.URLError, ConnectionError, http.client.RemoteDisconnected) as e:
-            # One retry when the connection drops (LM Studio swapping models): a single
+            # One retry when the connection drops (the server swapping models): a single
             # dropped request used to end a 10-minute run. A timeout is not retried.
             reason = getattr(e, "reason", e)
             if attempt == 1 and not isinstance(reason, TimeoutError):
@@ -76,12 +76,11 @@ def _post(url: str, payload: dict, headers: dict, timeout: int) -> dict:
                 continue
             raise PipelineError(
                 f"Could not reach {url}: {reason}\n"
-                "If you are using LM Studio, open it, load a model, go to the Developer "
-                "tab and press Start Server.")
+                "Start Ollama (the Ollama app, or `ollama serve` in a terminal).")
 
 
 # (token, log-probability) pairs of the last answer generated with logprobs=True.
-# LM Studio returns them only for text the model writes (it cannot score given
+# The server returns them only for text the model writes (it cannot score given
 # text), so they give the real perplexity of the model's own draft sentences.
 # Per thread: drafts from several models are written at the same time.
 _LOGPROBS = threading.local()
@@ -90,6 +89,8 @@ _LOGPROBS = threading.local()
 _USAGE = threading.local()
 # Servers that answered "API error 4xx" naming the reasoning_effort field.
 _NO_REASONING_FIELD: set = set()
+# Ollama models that answered "API error 4xx" naming the think field.
+_NO_THINK_FIELD: set = set()
 
 
 def last_logprobs() -> list:
@@ -97,16 +98,81 @@ def last_logprobs() -> list:
     return getattr(_LOGPROBS, "value", None) or []
 
 
-def _call_openai_compatible(prompt, model, max_tokens, api_key, timeout, base_url,
-                            schema=None, temperature=0.3, logprobs=False):
-    """LM Studio, Ollama, vLLM, llama.cpp, LocalAI - all speak this.
+def _root(base_url: str) -> str:
+    """Ollama's address without a trailing /v1 (its own API sits at the root)."""
+    base = (base_url or DEFAULT_BASE_URL).rstrip("/")
+    return base[:-3] if base.endswith("/v1") else base
 
-    `schema` (a JSON schema) turns on structured output: LM Studio constrains
+
+def _length_error(max_tokens: int) -> PipelineError:
+    # max_tokens ran out - not necessarily the context (a 128k context gave the
+    # same error when an answer simply ran past max_tokens)
+    return PipelineError(
+        f"The local model's answer ran past its {max_tokens}-token limit. If this "
+        "keeps happening, raise the model's context in MODEL_CONTEXT (ats_pipeline.py) "
+        "to 8k or more.")
+
+
+def _call_ollama(prompt, model, max_tokens, timeout, base_url,
+                 schema=None, temperature=0.3, logprobs=False):
+    """Ollama's own /api/chat. Unlike its OpenAI-compatible endpoint it takes the
+    context length per request (num_ctx), so each model runs with MODEL_CONTEXT
+    without a separate load step, and `think` switches reasoning off.
+
+    `schema` (a JSON schema) turns on structured output: Ollama constrains
     decoding so the reply is valid JSON of exactly that shape.
     """
-    base = (base_url or DEFAULT_BASE_URL).rstrip("/")
+    root = _root(base_url)
     # Qwen3's thinking mode took 35-43 s per bullet in testing (5-8 s without) and
     # "reasoned" its way into overstating edits, so it is switched off.
+    if "qwen3" in (model or "").lower():
+        prompt = "/no_think\n" + prompt
+    payload = {
+        "model": model,
+        "stream": False,
+        "messages": [{"role": "system", "content": prompts.SYSTEM},
+                     {"role": "user", "content": prompt}],
+        "options": {"num_ctx": MODEL_CONTEXT.get(model, DEFAULT_CONTEXT),
+                    "num_predict": max_tokens, "temperature": temperature},
+        # kept loaded between the many calls of a run, and its prompt cache with it
+        "keep_alive": "30m",
+    }
+    if schema:
+        payload["format"] = schema
+    if logprobs:
+        payload["logprobs"] = True
+    # Reasoning models ignore /no_think (Bonsai 27B spent every token thinking and
+    # returned nothing); think=false switches it off. A model that rejects the field
+    # is remembered, so it is not asked twice per call.
+    data = None
+    if model not in _NO_THINK_FIELD:
+        try:
+            data = _post(f"{root}/api/chat", dict(payload, think=False), {}, timeout)
+        except PipelineError as e:
+            if "API error 4" not in str(e) or "think" not in str(e).lower():
+                raise
+            _NO_THINK_FIELD.add(model)
+    if data is None:
+        data = _post(f"{root}/api/chat", payload, {}, timeout)
+    _USAGE.value = {"prompt_tokens": data.get("prompt_eval_count", 0),
+                    "completion_tokens": data.get("eval_count", 0)}
+    lp = data.get("logprobs") or (data.get("message") or {}).get("logprobs") or []
+    _LOGPROBS.value = [(c.get("token", ""), c.get("logprob")) for c in lp
+                       if c.get("logprob") is not None]
+    if data.get("done_reason") == "length":
+        raise _length_error(max_tokens)
+    # a reasoning block, if any, is in message.thinking; content is what we want
+    return (data.get("message") or {}).get("content") or ""
+
+
+def _call_openai_compatible(prompt, model, max_tokens, api_key, timeout, base_url,
+                            schema=None, temperature=0.3, logprobs=False):
+    """vLLM, llama.cpp, LocalAI, LM Studio - any server with /v1/chat/completions.
+
+    `schema` (a JSON schema) turns on structured output where the server
+    supports it.
+    """
+    base = (base_url or DEFAULT_BASE_URL).rstrip("/")
     if "qwen3" in (model or "").lower():
         prompt = "/no_think\n" + prompt
     payload = {
@@ -122,10 +188,9 @@ def _call_openai_compatible(prompt, model, max_tokens, api_key, timeout, base_ur
             "name": "answer", "strict": True, "schema": schema}}
     if logprobs:
         payload["logprobs"] = True
-    headers = {"authorization": f"Bearer {api_key or 'lm-studio'}"}
-    # Reasoning models ignore /no_think (Bonsai 27B spent every token thinking and
-    # returned nothing); LM Studio switches thinking off with reasoning_effort. A
-    # server that rejects the field is remembered, so it is not asked twice per call.
+    headers = {"authorization": f"Bearer {api_key or 'local'}"}
+    # reasoning_effort switches thinking off on servers that know it; a server that
+    # rejects the field is remembered, so it is not asked twice per call.
     data = None
     if base not in _NO_REASONING_FIELD:
         try:
@@ -147,126 +212,146 @@ def _call_openai_compatible(prompt, model, max_tokens, api_key, timeout, base_ur
     _LOGPROBS.value = [(c.get("token", ""), c.get("logprob")) for c in content_lp
                        if c.get("logprob") is not None]
     if choices[0].get("finish_reason") == "length":
-        # max_tokens ran out - not necessarily the context (a 128k context gave the
-        # same error when an answer simply ran past max_tokens)
-        raise PipelineError(
-            f"The local model's answer ran past its {max_tokens}-token limit. If this "
-            "keeps happening, check that the context length in LM Studio (Developer tab "
-            "> model settings) is 8k or more.")
-    # Some local models emit a reasoning block; the content field is what we want.
+        raise _length_error(max_tokens)
     return msg.get("content") or ""
 
 
-def list_local_models(base_url: str = None, timeout: int = 15):
-    """Chat models the OpenAI-compatible server has loaded (embedding models,
-    which cannot write text, are left out)."""
-    base = (base_url or DEFAULT_BASE_URL).rstrip("/")
+def _get_json(url: str, timeout: int = 15) -> dict:
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def list_local_models(base_url: str = None, timeout: int = 15, backend: str = DEFAULT_BACKEND):
+    """Chat models the server has (embedding models, which cannot write text,
+    are left out). For Ollama: every downloaded model, since it loads on demand."""
     try:
-        with urllib.request.urlopen(f"{base}/models", timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        if (backend or DEFAULT_BACKEND).lower() == "openai":
+            base = (base_url or DEFAULT_BASE_URL).rstrip("/")
+            ids = [m.get("id", "") for m in _get_json(f"{base}/models", timeout).get("data", [])]
+        else:
+            ids = list(_downloaded_models(base_url, timeout, strict=True))
     except Exception as e:  # noqa: BLE001
-        raise PipelineError(f"Could not reach {base}/models: {e}")
-    ids = [m.get("id", "") for m in data.get("data", [])]
+        raise PipelineError(f"Could not reach the model server at {base_url or DEFAULT_BASE_URL}: {e}\n"
+                            "Start Ollama (the Ollama app, or `ollama serve` in a terminal).")
     return [i for i in ids if "embed" not in i.lower()]
 
 
 # The judge: requirements, gap check, CV bullet edits and every fact-check. Override
-# with ATS_MODELS. (Until 2026-10-03 the default was the pair
-# "qwen/qwen3-4b-2507,llama-3.2-3b-instruct", both also drafting letters.)
-DEFAULT_LOCAL_MODELS = os.environ.get("ATS_MODELS", "qwen/qwen3-4b-2507")
-# Context each model is loaded with. Loaded on demand, LM Studio gave Llama its
-# maximum (131072), whose working memory filled the GPU so Qwen could not load.
-# (LM Studio rounds a requested 6000 up to 6144.)
-MODEL_CONTEXT = {"qwen/qwen3-4b-2507": 6144, "llama-3.2-3b-instruct": 6144,
-                 "prism-ml/bonsai-27b": 6144}
+# with ATS_MODELS. (Until 2026-10-03 the default was the pair Qwen3-4B + Llama 3.2
+# 3B, both also drafting letters.) Names are Ollama's: `ollama pull <name>`.
+DEFAULT_LOCAL_MODELS = os.environ.get("ATS_MODELS", "qwen3:4b-instruct-2507-q4_K_M")
 # Who writes the cover letter and recruiter message, separate from the judge (the
 # first model above), which keeps requirements, the fact-check and the CV edits. The
 # 3-4B judges invented 5-17 letter sentences per job for the fact-check to delete
 # (2026-10-03), so a larger model writes. Comma-separate several to draft in parallel.
-DEFAULT_WRITER = os.environ.get("ATS_WRITER", "prism-ml/bonsai-27b")
+DEFAULT_WRITER = os.environ.get("ATS_WRITER", "hf.co/prism-ml/Bonsai-27B-gguf:Q1_0")
+# Context each model runs with (sent as num_ctx on every request). A model's own
+# maximum (131072 for Llama) filled the GPU with working memory so the second
+# model could not load.
+MODEL_CONTEXT = {"qwen3:4b-instruct-2507-q4_K_M": 6144, "llama3.2:3b": 6144,
+                 "hf.co/prism-ml/Bonsai-27B-gguf:Q1_0": 6144}
 DEFAULT_CONTEXT = 6144
 
 
-def _lms_path() -> str:
-    """LM Studio's command-line tool, which loads models with a chosen context."""
-    found = shutil.which("lms")
+def _ollama_path() -> str:
+    """Ollama's command-line program, or "" when it is not installed."""
+    found = shutil.which("ollama")
     if found:
         return found
-    for p in (Path.home() / ".lmstudio" / "bin" / "lms.exe", Path.home() / ".lmstudio" / "bin" / "lms",
-              Path.home() / ".cache" / "lm-studio" / "bin" / "lms.exe"):
+    local = Path(os.environ.get("LOCALAPPDATA", ""))
+    for p in (local / "Programs" / "Ollama" / "ollama.exe", Path("/usr/local/bin/ollama"),
+              Path("/usr/bin/ollama"), Path("/Applications/Ollama.app")):
         if p.exists():
             return str(p)
     return ""
 
 
-def _lms(args: list, timeout: int = 300) -> subprocess.CompletedProcess:
-    """Run lms quietly (no console window flashing up from the .exe)."""
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    return subprocess.run([_lms_path()] + args, capture_output=True, text=True, timeout=timeout,
-                          encoding="utf-8", errors="replace", creationflags=flags)
+def _downloaded_models(base_url: str, timeout: int = 15, strict: bool = False) -> dict:
+    """{model name: size in bytes} of the models Ollama has downloaded; {} when
+    the server does not answer (an exception instead with strict=True)."""
+    try:
+        data = _get_json(f"{_root(base_url)}/api/tags", timeout)
+    except Exception:  # noqa: BLE001 - not running, or not Ollama
+        if strict:
+            raise
+        return {}
+    return {m.get("name", ""): m.get("size", 0) for m in data.get("models", [])}
 
 
 def _loaded_models(base_url: str) -> dict:
-    """{model id: loaded context length or None if not loaded} from LM Studio."""
-    base = (base_url or DEFAULT_BASE_URL).rstrip("/").rsplit("/v1", 1)[0]
+    """{model name: context it is loaded with (0 if not reported)} for the models
+    Ollama has in memory right now."""
     try:
-        with urllib.request.urlopen(f"{base}/api/v0/models", timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8")).get("data", [])
-    except Exception:  # noqa: BLE001 - older LM Studio or another server
+        data = _get_json(f"{_root(base_url)}/api/ps")
+    except Exception:  # noqa: BLE001
         return {}
-    return {m.get("id", ""): (m.get("loaded_context_length") if m.get("state") == "loaded" else None)
-            for m in data}
+    return {m.get("name", ""): m.get("context_length") or 0 for m in data.get("models", [])}
+
+
+def _same_model(a: str, b: str) -> bool:
+    """Ollama adds ":latest" to names given without a tag."""
+    tag = lambda n: n if ":" in n.rsplit("/", 1)[-1] else n + ":latest"
+    return tag(a) == tag(b)
 
 
 def ensure_models_loaded(models: list, base_url: str = None, log=print) -> None:
-    """Load `models` in LM Studio with the right context, so nothing has to be typed:
-    other chat models are unloaded first (6 GB of GPU memory holds the pair, not a
-    third model), embedding models stay. Does nothing when the models are already
-    loaded as wanted, when the server is not LM Studio, or when lms is missing."""
+    """Check that `models` are downloaded (stops with the `ollama pull` command
+    otherwise), unload other chat models (6 GB of GPU memory does not hold a third
+    one; embedding models stay), and load the first model with its context, so the
+    wait comes before the run. Does nothing when the server is not Ollama."""
     wanted = {m: MODEL_CONTEXT.get(m, DEFAULT_CONTEXT) for m in dict.fromkeys(models) if m}
-    state = _loaded_models(base_url)
-    if not wanted or not state:
+    try:
+        have = _downloaded_models(base_url, strict=True)
+    except Exception:  # noqa: BLE001 - not Ollama, or not running: the first call says so
         return
-    # loaded with enough context, and not the huge default that fills the GPU
-    fits = lambda m, ctx: state.get(m) is not None and ctx <= state[m] <= 2 * ctx
-    if all(fits(m, ctx) for m, ctx in wanted.items()):
+    if not wanted:
         return
-    if not _lms_path():
-        log("LM Studio's lms tool was not found; load these models in LM Studio yourself: "
-            + ", ".join(wanted))
-        return
-    missing = [m for m in wanted if m not in state]
+    missing = [m for m in wanted if not any(_same_model(m, h) for h in have)]
     if missing:
-        log(f"Not downloaded in LM Studio: {', '.join(missing)} - download them first.")
-    for model_id, ctx in state.items():
-        if ctx is not None and model_id not in wanted and "embed" not in model_id.lower():
-            log(f"Unloading {model_id} to make room on the GPU...")
-            _lms(["unload", model_id])
-    for model_id, ctx in wanted.items():
-        if model_id in missing or fits(model_id, ctx):
+        # every call to a missing model would fail ("model not found"), so stop here
+        raise PipelineError(f"Not downloaded in Ollama: {', '.join(missing)}. Run "
+                            + " and ".join(f"`ollama pull {m}`" for m in missing) + " first.")
+    root = _root(base_url)
+    for name in _loaded_models(base_url):
+        if not any(_same_model(name, m) for m in wanted) and "embed" not in name.lower():
+            log(f"Unloading {name} to make room on the GPU...")
+            try:
+                _post(f"{root}/api/generate", {"model": name, "keep_alive": 0}, {}, 60)
+            except PipelineError:
+                pass
+    loaded = _loaded_models(base_url)
+    # Only the first model (the judge, which reads the requirements first): on a 6 GB
+    # GPU loading the writer too pushed the judge out again, one extra swap (5-8 s)
+    # per run (2026-10-21). The others load on their first call.
+    for model_id, ctx in list(wanted.items())[:1]:
+        if any(_same_model(model_id, n) and c in (0, ctx)
+                                      for n, c in loaded.items()):
             continue
-        if state.get(model_id) is not None:
-            _lms(["unload", model_id])
-        log(f"Loading {model_id} in LM Studio (context {ctx}, on the GPU)...")
-        result = _lms(["load", model_id, "--context-length", str(ctx), "--gpu", "max", "-y"])
-        if result.returncode != 0:
-            log(f"Could not load {model_id}: {(result.stderr or result.stdout).strip()[-300:]}")
+        log(f"Loading {model_id} in Ollama (context {ctx})...")
+        try:     # a request without a prompt only loads the model
+            _post(f"{root}/api/generate", {"model": model_id, "keep_alive": "30m",
+                                           "options": {"num_ctx": ctx}}, {}, 600)
+        except PipelineError as e:
+            log(f"Could not load {model_id}: {str(e)[-300:]}")
 
 
 def call_model(prompt: str, model: str = DEFAULT_MODEL, max_tokens: int = 1500,
                api_key: str = None, timeout: int = 600,
                backend: str = DEFAULT_BACKEND, base_url: str = None,
                schema: dict = None, temperature: float = 0.3, logprobs: bool = False) -> str:
-    """Local models only: LM Studio, or another OpenAI-compatible server on
-    this machine. `schema` enforces JSON output.
+    """Local models only: Ollama, or another OpenAI-compatible server on this
+    machine. `schema` enforces JSON output.
     `temperature` 0 is for judgements (requirements, verification, fact-check):
     at 0.3 Bonsai answered "yes" for the ANSYS bullet in one run and "no" in the
     next."""
     backend = (backend or DEFAULT_BACKEND).lower()
-    if backend in ("lmstudio", "openai", "local"):
+    if backend in ("ollama", "local"):
+        return _call_ollama(prompt, model, max_tokens, timeout, base_url,
+                            schema, temperature, logprobs)
+    if backend in ("openai", "lmstudio"):
         return _call_openai_compatible(prompt, model, max_tokens, api_key,
                                        timeout, base_url, schema, temperature, logprobs)
-    raise PipelineError(f"Unknown backend '{backend}'. Use lmstudio.")
+    raise PipelineError(f"Unknown backend '{backend}'. Use ollama or openai.")
 
 
 # --------------------------------------------------------------------- helpers
@@ -307,6 +392,29 @@ def _unprotect(value):
     if isinstance(value, dict):
         return {k: _unprotect(v) for k, v in value.items()}
     return value
+
+
+def _as_role(text: str, profile: dict, prev: str = "") -> str:
+    """"... for testing constraints at Student Assistant (SHK) at Robotics Lab, ..." ->
+    "... as a Student Assistant (SHK) at the Robotics Lab, ...": the facts' "Title @
+    Employer" label read as a place (Ubica, 2026-10-21, three times in one letter).
+    A trailing "as a <title>." the sentence before already said is dropped."""
+    for e in profile.get("experience") or []:
+        title, org = (e.get("title") or "").strip(), (e.get("employer") or "").strip()
+        if not title:
+            continue
+        art = "an" if title[0].lower() in "aeiou" else "a"
+        the = "the " if org and org.split()[0].lower() in _PLACE_ARTICLE else ""
+        text = re.sub(rf"\bat (?:the |an? )?{re.escape(title)}(?: at (?:the )?({re.escape(org)}))?"
+                      if org else rf"\bat (?:the |an? )?{re.escape(title)}",
+                      lambda m: f"as {art} {title}" + (f" at {the}{m.group(1)}"
+                                                       if org and m.group(1) else ""),
+                      text)
+        if the:     # "As a Student Assistant (SHK) at Robotics Lab," -> "at the Robotics Lab,"
+            text = re.sub(rf"(\b[Aa]s {art} {re.escape(title)} at )(?={re.escape(org)})", rf"\1{the}", text)
+        if f"as {art} {title}" in prev:
+            text = re.sub(rf"\s+as {art} {re.escape(title)}(?=[.!?]$)", "", text)
+    return text
 
 
 def _at_word(text: str) -> str:
@@ -691,6 +799,14 @@ def _entails(sentence: str, support: list, call) -> bool:
         return False
 
 
+def _in_project(name: str) -> str:
+    """"In my XR Simulation of Factory project"; a name that is not a plain title
+    goes in quotes: "In my Runner-up, NEO & NERC robotics competitions project"
+    read as broken English (Fraunhofer, 2026-10-21)."""
+    name = name.strip()
+    return f'In my project "{name}"' if re.search(r"[,;:]", name) else f"In my {name} project"
+
+
 def _place_phrase(line: str, profile: dict) -> str:
     """"At SOCO Engineers GmbH" / "In my Autonomous UAV ... project" for a work or
     project fact line, else ""."""
@@ -701,7 +817,7 @@ def _place_phrase(line: str, profile: dict) -> str:
         org = m.group("org").strip()
         the = "the " if org.split()[0].lower() in _PLACE_ARTICLE else ""
         return f"At {the}{org}"
-    return f"In my {m.group('proj').strip()} project"
+    return _in_project(m.group('proj'))
 
 
 def _added_tools(sentence: str, facts: list, profile: dict) -> list:
@@ -750,6 +866,56 @@ def _role_phrase(text: str, company: str = "") -> str:
                   r"\s+(role|position)\b",
                   lambda m: f"{m.group(1) or ''}{m.group(2)} {m.group(4)} at {m.group(3)}",
                   text or "", count=1)
+
+
+_GENDER_TAG = r"\s*\((?:[mwfdx]\s*/\s*){2,3}[mwfdx]\)|\s*\((?:all genders|gn\*?)\)"
+# the title already names what it is: "... Thesis", "... Internship"
+_ROLE_NOUN = re.compile(r"\b(position|role|job|post|vacancy|opening|internship|thesis|"
+                        r"placement|Praktikum|Masterarbeit|Abschlussarbeit)$", re.I)
+
+
+def _title_noun(text: str, role: str, company: str = "") -> str:
+    """"applying for the Werkstudent - Lebensdauertest (all genders) at Fraunhofer" ->
+    "... Lebensdauertest position at Fraunhofer": the ad's title with no noun after
+    it, and its gender tag, which belongs in the ad (Fraunhofer, 2026-10-21)."""
+    title = re.sub(_GENDER_TAG, "", role or "", flags=re.I).strip()
+    if not title or not text:
+        return text
+    words = r"\s+".join(re.escape(w) for w in title.split())
+    # the tag goes also where a noun follows: "... (all genders) role at Fraunhofer"
+    text = re.sub(rf"({words})(?:{_GENDER_TAG})(?=\s+(?:role|position)\b)", r"\1", text,
+                  count=1, flags=re.I)
+
+    # "Masterarbeit: Lifelong Mapping ... Karten" names what it is at the start
+    # ("... Karten position at Fraunhofer", 2026-10-21)
+    starts = re.match(r"[^:–-]{0,30}?\w*?(internships?|thes[ie]s|praktik(?:um|a)|arbeit|position|role)\b",
+                      title, re.I)
+
+    def fix(m):
+        noun = "" if _ROLE_NOUN.search(m.group(1)) or starts else " position"
+        return f"{m.group(1)}{noun}{m.group(2)}"
+    return re.sub(rf"({words})(?:{_GENDER_TAG})?(\s+at\s+(?:{_company_pat(company)}))",
+                  fix, text, count=1, flags=re.I)
+
+
+def _place_first(text: str, orgs: str) -> str:
+    """"I am applying ... I wrote and debugged C++ and Python code at SOCO Engineers
+    GmbH, adding ..." -> "... At SOCO Engineers GmbH, I wrote and debugged ...":
+    two sentences opening with "I" in a three-sentence message (predictability 62,
+    Fraunhofer 2026-10-21). Only the sentence after one that also opens with "I"."""
+    parts = re.split(r"(?<=[.!?])\s+", text or "")
+    for i in range(1, len(parts)):
+        if not (parts[i - 1].startswith("I ") and parts[i].startswith("I ")):
+            continue
+        m = re.match(rf"I (.+?) at ((?:the )?(?:{orgs}))(?=[,.]|\s+(?:as|in|for|where)\b)(.*)$",
+                     parts[i], re.S)
+        if m:
+            org = m.group(2)
+            # "At the Robotics Lab, ...", as in the letter
+            if not org.lower().startswith("the ") and org.split()[0].lower() in _PLACE_ARTICLE:
+                org = "the " + org
+            parts[i] = f"At {org}, I {m.group(1)}{m.group(3)}"
+    return " ".join(parts)
 
 
 def _intro_stop(text: str, company: str = "") -> str:
@@ -973,7 +1139,7 @@ def _fact_sentence(line: str, profile: dict) -> str:
         org = m.group("org").strip()
         the = "the " if org.split()[0].lower() in _PLACE_ARTICLE else ""
         return f"At {the}{org}, {body}"
-    return f"In my {m.group('proj').strip()} project, {body}"
+    return f"{_in_project(m.group('proj'))}, {body}"
 
 
 _TAIL_TALK = re.compile(r"\b(interest\w*|keen|eager|languages?|native|fluent\w*|German|English|"
@@ -981,26 +1147,41 @@ _TAIL_TALK = re.compile(r"\b(interest\w*|keen|eager|languages?|native|fluent\w*|
 _INTRO_TALK = re.compile(r"\b(apply\w*|application|position|role)\b", re.I)
 
 
-def _add_studies(letter: str, profile: dict) -> str:
-    """A paragraph with the current degree's courses and the languages, in the
-    profile's own words, before the closing - for a true letter that is short.
-    Parts the letter already says are skipped."""
+def _add_studies(letter: str, profile: dict, requirements=()) -> str:
+    """A paragraph with a degree's courses and the languages, in the profile's own
+    words, before the closing - for a true letter that is short. The degree whose
+    courses match the job's met requirements is used, else the current one; parts
+    the letter already says are skipped."""
     paras = [p for p in re.split(r"\n\s*\n", letter) if p.strip()]
     if not paras:
         return letter
     flat = " ".join(paras).lower()
     extra = []
-    current = next((ed for ed in profile.get("education") or []
-                    if (ed.get("status") or "").lower() == "in progress"), None)
-    courses = [c for c in (current or {}).get("coursework") or [] if c.lower() not in flat]
+    # in-progress degree first, so it wins a tie
+    degrees = sorted(profile.get("education") or [],
+                     key=lambda ed: (ed.get("status") or "").lower() != "in progress")
+    # The M.Eng's Autonomous Systems, AR/VR and Additive Manufacturing went into a
+    # power-electronics letter, while the B.Sc's Power Electronics - the one
+    # requirement met - stayed out (Fraunhofer, 2026-10-21).
+    met = _relevance_stems(" ".join(r.get("skill", "") for r in requirements
+                                    if r.get("status") in ("have", "alternative")))
+    hits = lambda c: len(_relevance_stems(c) & met)
+    chosen = max(degrees, key=lambda ed: sum(map(hits, ed.get("coursework") or [])), default=None)
+    if not chosen or not any(map(hits, chosen.get("coursework") or [])):
+        chosen = degrees[0] if degrees and (degrees[0].get("status") or "").lower() == "in progress" \
+            else None
+    courses = sorted((c for c in (chosen or {}).get("coursework") or [] if c.lower() not in flat),
+                     key=lambda c: -hits(c))
     # one coursework sentence per letter: the letter's own "My M.Eng coursework
     # includes Autonomous Systems." plus an added "My M.Eng coursework includes AR/VR
     # ..." read as a repeat (ZEISS, 2026-10-12)
     if courses and not re.search(r"\b(coursework|courses?|my studies (?:include|cover))\b", flat):
-        degree = current["degree"].split(" ")[0]
+        degree = chosen["degree"].split(" ")[0]
+        now = (chosen.get("status") or "").lower() == "in progress"
         pairs = _in_pairs(courses)
-        extra.append(f"My {degree} coursework includes {pairs[0]}."
-                     + (f" It also covers {', as well as '.join(pairs[1:])}." if pairs[1:] else ""))
+        extra.append(f"My {degree} coursework {'includes' if now else 'included'} {pairs[0]}."
+                     + (f" It also {'covers' if now else 'covered'} {', as well as '.join(pairs[1:])}."
+                        if pairs[1:] else ""))
     if not _LANGUAGE_TALK.search(flat):
         extra += _languages_sentences(profile.get("languages") or [])
     if extra:
@@ -1820,7 +2001,7 @@ def _tidy_letter(text: str, profile: dict, role: str = "", ad: str = "",
     for p_no, para in enumerate(re.split(r"\n\s*\n", (text or "").strip())):
         sents = []
         for s in (x for x in re.split(r"(?<=[.!?])\s+", para.strip()) if x):
-            s = _keen_not_lack(_strip_inference(s))
+            s = _as_role(_keen_not_lack(_strip_inference(s)), profile, prev)
             if not s or _SUMMARY.match(s):
                 continue
             # "C++ is required for this internship." says nothing about the candidate
@@ -2460,11 +2641,13 @@ def write_texts(profile, job_description, lang, gaps, recruiter, call, log, forb
         text = _tidy_recruiter(_intro_stop(text or "", company), profile)
         text = _complete_recruiter(text or "", profile, list(requirements), (meta or {}).get("role", ""))
         text = checks.fix_recruiter_question(text)
+        orgs = "|".join(re.escape(e["employer"]) for e in profile.get("experience") or []
+                        if e.get("employer"))
+        if orgs:      # before the articles: "At the Robotics Lab, ..."
+            text = _place_first(text, orgs)
         text = _with_article(_at_word(_role_phrase(text, company)), profile)
         # "As a Student Assistant (SHK) at Robotics Lab, Technische Hochschule
         # Deggendorf I built ..." - the comma before "I" (Fraunhofer, 2026-10-19)
-        orgs = "|".join(re.escape(e["employer"]) for e in profile.get("experience") or []
-                        if e.get("employer"))
         if orgs:
             text = re.sub(rf"(\bAs an? [^.]*? at (?:the )?(?:{orgs}))\s+(?=I\s)", r"\1, ", text)
         return text
@@ -2495,7 +2678,7 @@ def write_texts(profile, job_description, lang, gaps, recruiter, call, log, forb
             # 137-word, one-paragraph draft went to the profile fallback, 2026-10-04).
             # Studies and languages first: a draft that already has its four work
             # examples cannot take more (Magazino: 106 true words, 2026-10-04).
-            mended = _add_studies(_reparagraph(text), profile)
+            mended = _add_studies(_reparagraph(text), profile, list(requirements))
             again = check(mended) + checks.gap_claims(mended, forbidden)
             if any(p.startswith("cover letter has") for p in again):
                 mended = _top_up(mended, profile, list(requirements))
@@ -2507,7 +2690,7 @@ def write_texts(profile, job_description, lang, gaps, recruiter, call, log, forb
         return text, problems
 
     # The recruiter message first: its prompt shares the letter's opening, so the
-    # letter's drafts then find it in LM Studio's prompt cache. Written after the
+    # letter's drafts then find it in Ollama's prompt cache. Written after the
     # letter, it came after the style revision, whose different prompt had replaced
     # the cache, and took 100-115 s instead of ~20 s (2026-10-11).
     for field, make, check, schema in (
@@ -2691,6 +2874,10 @@ def write_texts(profile, job_description, lang, gaps, recruiter, call, log, forb
         issues += best_problems
     results["factcheck_removed"] = removed_all
     results, issues = _unprotect(results), _unprotect(issues)
+    for field in ("cover_letter", "recruiter_message"):
+        if results.get(field):
+            results[field] = _title_noun(results[field], _unprotect((meta or {}).get("role", "")),
+                                         company)
     _ABBREV["toks"] = []
     return results, issues
 

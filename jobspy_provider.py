@@ -101,6 +101,11 @@ class JobSpyProvider(Provider):
             kwargs["country_indeed"] = country
         if self.hours_old:
             kwargs["hours_old"] = self.hours_old
+        if "linkedin" in sites:
+            # LinkedIn search results carry no description; without this, all 22
+            # LinkedIn jobs in the database had an empty one, so the CV generator
+            # had only the title to go on (2026-10-21). One extra request per job.
+            kwargs["linkedin_fetch_description"] = True
         print(f"[jobspy] {sites} '{query}' in '{location}'…", file=sys.stderr)
         df = scrape_jobs(**kwargs)
         for _, row in df.iterrows():

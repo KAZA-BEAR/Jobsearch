@@ -75,6 +75,26 @@ def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _job_posting(page: str) -> dict:
+    """The schema.org JobPosting a job page embeds as JSON-LD, or {}."""
+    for m in re.finditer(r'<script[^>]+application/ld\+json[^>]*>(.*?)</script>', page, re.S):
+        try:
+            data = json.loads(m.group(1))
+        except ValueError:
+            continue
+        for d in data if isinstance(data, list) else [data]:
+            if isinstance(d, dict) and d.get("@type") == "JobPosting":
+                return d
+    return {}
+
+
+def _text(raw: str) -> str:
+    """HTML to plain text, one line per paragraph or list item."""
+    text = re.sub(r"(?i)<\s*(br|/p|/li|/h\d|/div)\b[^>]*>", "\n", html.unescape(raw or ""))
+    text = html.unescape(re.sub(r"<[^>]+>", " ", text))
+    return "\n".join(" ".join(l.split()) for l in text.splitlines() if l.strip())
+
+
 class ResearchFeeds:
     name = "research"
 
@@ -106,6 +126,15 @@ class ResearchFeeds:
         resp.raise_for_status()
         return resp
 
+    def _posting(self, url: str) -> dict:
+        """The JobPosting on a job's own page; {} when the page cannot be read."""
+        if not url:
+            return {}
+        try:
+            return _job_posting(self._get(url).text)
+        except (requests.RequestException, ValueError):
+            return {}
+
     def _successfactors(self, source: str, keywords: str) -> list[Job]:
         company, url = SUCCESSFACTORS[source]
         resp = self._get(url, locale="de_DE", keywords=keywords)
@@ -134,18 +163,29 @@ class ResearchFeeds:
         words = [w.lower() for w in keywords.split() if w]
         out = []
         for item in ET.fromstring(resp.content).iter("item"):
-            title = (item.findtext("title") or "").strip()
+            # "Finanzen &amp; Einkauf": the feed escapes its titles twice
+            title = html.unescape((item.findtext("title") or "").strip())
             desc = _clean(item.findtext("description") or "")
             blob = f"{title} {desc}".lower()
             if words and not any(w in blob for w in words):
                 continue
             link = (item.findtext("link") or "").strip()
             m = re.search(r"\bin ([A-ZÄÖÜ][\wäöüß-]+(?: [A-ZÄÖÜ][\wäöüß-]+)?)", desc)
+            city = f"{m.group(1)}, DE" if m else "DE"
+            # The feed has a two-line teaser (22 of 24 jobs under 500 characters,
+            # 2026-10-21); the job's page embeds the full ad and its city.
+            posting = self._posting(link)
+            if posting.get("description"):
+                desc = _text(posting["description"])
+                town = ((posting.get("jobLocation") or {}).get("address") or {}) \
+                    if isinstance(posting.get("jobLocation"), dict) else {}
+                if town.get("addressLocality"):
+                    city = f"{town['addressLocality']}, {town.get('addressCountry') or 'DE'}"
             out.append(Job(
                 job_id=f"mpg-{link.rstrip('/').split('/')[-2] if '/' in link else sha1(link.encode()).hexdigest()[:12]}",
                 title=title,
                 company="Max Planck Society",
-                location=f"{m.group(1)}, DE" if m else "DE",
+                location=city,
                 url=link,
                 posted_at=_iso(item.findtext("pubDate") or ""),
                 employment_type=_kind(title),

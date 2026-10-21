@@ -916,7 +916,7 @@ def predictability(text: str, sentence_logprobs: dict = None) -> dict:
     An estimate, not a detector: rhythm (sentence-length variation, the
     "burstiness" AI detectors measure), repeated sentence openings, stock AI
     words, and formula patterns. When the model's own token log-probabilities are
-    known for a sentence (LM Studio returns them for text it generates), their
+    known for a sentence (Ollama returns them for text it generates), their
     perplexity is included too: low perplexity = each word was the obvious
     choice."""
     text = (text or "").strip()

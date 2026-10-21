@@ -148,7 +148,10 @@ class WorkdayBoards:
             if cancelled is not None and cancelled.is_set():
                 break
             known = cached(job.job_id) if cached else None
-            if known:
+            # Only a real description: a job past the detail limit is stored with the
+            # list's bullet fields, its requisition ID ("JR10443551"), which then
+            # counted as known and was never fetched (8 jobs, 2026-10-21).
+            if known and len(known) >= 200:
                 job.description = known
             elif fetched < details:
                 self._fill_detail(site, job)

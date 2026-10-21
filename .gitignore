@@ -24,3 +24,4 @@ build/
 dist/
 __pycache__/
 *.pyc
+crash.log

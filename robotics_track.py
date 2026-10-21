@@ -19,6 +19,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import html
 import re
 import sys
 from dataclasses import dataclass
@@ -227,6 +228,17 @@ MECHATRONICS_MARKERS = re.compile(
 )
 
 
+_STUDENT_TITLE = re.compile(r"(werkstudent|working student|intern|praktik|thesis|abschlussarbeit|"
+                            r"masterarbeit|bachelorarbeit|student)", re.IGNORECASE)
+
+
+def _html_lines(raw: str) -> str:
+    """HTML to plain text, one line per paragraph or list item."""
+    text = re.sub(r"(?i)<\s*(br|/p|/li|/h\d|/div)\b[^>]*>", "\n", raw or "")
+    text = html.unescape(re.sub(r"<[^>]+>", " ", text))
+    return "\n".join(" ".join(l.split()) for l in text.splitlines() if l.strip())
+
+
 class ATSBoards:
     """Fetch postings straight from employers' applicant-tracking systems."""
 
@@ -302,6 +314,20 @@ class ATSBoards:
         # Nothing worked for this board
         return []
 
+    def _sr_details(self, ref: str) -> str:
+        """A SmartRecruiters posting's text: company, job, qualifications, extras."""
+        if not ref:
+            return ""
+        self.limiter.wait()
+        try:
+            sections = (request_with_retry(self.session, "GET", ref).json()
+                        .get("jobAd") or {}).get("sections") or {}
+        except Exception:  # noqa: BLE001 - the job is kept without it
+            return ""
+        return "\n".join(_html_lines((sections.get(k) or {}).get("text") or "")
+                         for k in ("jobDescription", "qualifications", "additionalInformation",
+                                   "companyDescription") if (sections.get(k) or {}).get("text"))
+
     def _parse(self, board: Board, data):
         if board.ats == "greenhouse":
             rows = data.get("jobs", [])
@@ -313,16 +339,27 @@ class ATSBoards:
         elif board.ats == "lever":
             for r in data if isinstance(data, list) else []:
                 cats = r.get("categories") or {}
+                # descriptionPlain is only the opening (ANYbotics: its two-line
+                # company intro, 2026-10-21); the tasks and requirements are in
+                # "lists", the closing in additionalPlain
+                parts = [r.get("descriptionPlain") or ""]
+                for l in r.get("lists") or []:
+                    parts += [l.get("text") or "", _html_lines(l.get("content") or "")]
+                parts.append(r.get("additionalPlain") or "")
                 yield self._job(board, r.get("id"), r.get("text"),
                                 cats.get("location"), r.get("hostedUrl"),
-                                r.get("createdAt"), r.get("descriptionPlain", ""))
+                                r.get("createdAt"), "\n".join(p.strip() for p in parts if p.strip()))
         elif board.ats == "smartrecruiters":
             for r in data.get("content", []):
                 loc = r.get("location") or {}
+                # the list has no text at all; each posting's own record has it.
+                # Fetched for relevant titles only: a board lists up to 100.
+                desc = (self._sr_details(r.get("ref")) if MECHATRONICS_MARKERS.search(r.get("name") or "")
+                        or _STUDENT_TITLE.search(r.get("name") or "") else "")
                 yield self._job(board, r.get("id"), r.get("name"),
                                 loc.get("city"),
                                 f"https://jobs.smartrecruiters.com/{board.slug}/{r.get('id')}",
-                                r.get("releasedDate"), "")
+                                r.get("releasedDate"), desc)
         elif board.ats == "ashby":
             for r in data.get("jobs", []):
                 yield self._job(board, r.get("id"), r.get("title"),

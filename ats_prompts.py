@@ -118,7 +118,7 @@ CLAIM_RULES = """- State only what the facts say. Never add a skill, tool, task,
 
 
 # The opening every writer prompt shares, word for word: rules, style, job and facts.
-# LM Studio keeps the last prompt it read per model and re-reads only what changed,
+# Ollama keeps the last prompt it read per model and re-reads only what changed,
 # so the recruiter message, a rewrite and the style revision skip the ~2,000 tokens
 # the letter prompt already read - with the task at the END, not the start
 # (2026-10-11; the 27B writer reads a prompt slowly, partly from system memory).
@@ -191,7 +191,7 @@ writing style above. Do not write the fact IDs (F1, F2, ...) in the message.
 
 Output only the JSON."""
 
-# Structured output: LM Studio constrains decoding to this shape, so the message
+# Structured output: Ollama constrains decoding to this shape, so the message
 # always has exactly three parts. (In testing the free-text prompt produced two
 # sentences as often as three.)
 RECRUITER_SCHEMA = {

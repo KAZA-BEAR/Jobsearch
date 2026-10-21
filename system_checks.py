@@ -5,8 +5,8 @@ Three groups, each check reporting pass / warn / fail / skip with a reason:
 
   APIs       every job source answers a small real request; keyed sources
              (USAJOBS, Adzuna, both free) are skipped when no key is set
-  LM Studio  the app and its lms tool are installed, every model the CV
-             generator needs is downloaded, and the local server answers
+  Ollama     the program is installed, the local server answers, and every
+             model the CV generator needs is downloaded
   Hardware   64-bit Python, AVX2, RAM, GPU memory against the models' size,
              free disk space, and pdflatex for the Compile PDF option
 
@@ -32,7 +32,7 @@ import requests
 
 from linkedin_jobs import data_dir
 
-GROUPS = ("APIs", "LM Studio", "Hardware")
+GROUPS = ("APIs", "Ollama", "Hardware")
 PASS, WARN, FAIL, SKIP = "pass", "warn", "fail", "skip"
 GB = 1024 ** 3
 TIMEOUT = 20
@@ -247,7 +247,7 @@ def api_checks(sec_email: str = "") -> list[tuple[str, callable]]:
 
 
 # --------------------------------------------------------------------------
-# LM Studio
+# Ollama
 # --------------------------------------------------------------------------
 
 def required_models() -> list[str]:
@@ -258,75 +258,69 @@ def required_models() -> list[str]:
     return list(dict.fromkeys(chat)) + [EMBED_MODEL]
 
 
-def downloaded_models() -> dict[str, dict] | None:
-    """{model key: lms ls entry}, or None if lms is not available."""
-    from ats_pipeline import _lms_path
-    lms = _lms_path()
-    if not lms:
+def downloaded_models(base_url: str = None) -> dict[str, int] | None:
+    """{model name: size in bytes}, or None if the Ollama server does not answer
+    (it lists its models only while running)."""
+    from ats_pipeline import _downloaded_models
+    try:
+        return _downloaded_models(base_url, timeout=5, strict=True)
+    except Exception:  # noqa: BLE001
         return None
-    res = _run([lms, "ls", "--json"], timeout=60)
-    if res.returncode != 0:
-        raise RuntimeError((res.stderr or res.stdout).strip()[-300:])
-    return {m.get("modelKey") or m.get("path"): m for m in json.loads(res.stdout)}
 
 
-def _lm_app():
-    local = Path(os.environ.get("LOCALAPPDATA", ""))
-    candidates = [local / "Programs" / "LM Studio" / "LM Studio.exe",
-                  local / "Programs" / "lm-studio" / "LM Studio.exe",
-                  Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "LM Studio" / "LM Studio.exe",
-                  Path("/Applications/LM Studio.app")]
-    for p in candidates:
-        if p.exists():
-            return PASS, f"installed at {p}"
-    from ats_pipeline import _lms_path
-    if _lms_path():
-        return PASS, "app not in the usual folder, but its lms tool is installed"
-    return FAIL, "not found; install it from https://lmstudio.ai"
+def _find_model(models: dict, model: str):
+    from ats_pipeline import _same_model
+    return next((size for name, size in models.items() if _same_model(name, model)), None)
 
 
-def _lm_cli():
-    from ats_pipeline import _lms_path
-    lms = _lms_path()
-    if not lms:
-        return FAIL, ("lms tool not found; open LM Studio once, or run "
-                      "~/.lmstudio/bin/lms bootstrap. Without it models must be loaded by hand")
-    return PASS, f"found at {lms}"
+def _ol_app():
+    from ats_pipeline import _ollama_path
+    path = _ollama_path()
+    if path:
+        return PASS, f"installed at {path}"
+    return FAIL, "not found; install it from https://ollama.com/download"
 
 
-def _lm_model(model: str, cache: dict):
+def _ol_model(model: str, cache: dict, base_url: str):
     def check():
         if "models" not in cache:
-            cache["models"] = downloaded_models()
+            cache["models"] = downloaded_models(base_url)
         models = cache["models"]
         if models is None:
-            raise Skip("lms tool not found, so downloaded models cannot be listed")
-        m = models.get(model)
-        if m is None:
-            return FAIL, f"not downloaded; search for '{model}' in LM Studio and download it"
-        return PASS, f"downloaded, {m.get('sizeBytes', 0) / GB:.1f} GB"
+            raise Skip("Ollama is not running, so downloaded models cannot be listed")
+        size = _find_model(models, model)
+        if size is None:
+            return FAIL, f"not downloaded; run: ollama pull {model}"
+        return PASS, f"downloaded, {size / GB:.1f} GB"
     return check
 
 
-def _lm_server(base_url: str):
+def _ol_server(base_url: str):
     def check():
-        from ats_pipeline import _loaded_models, list_local_models, PipelineError
+        from ats_pipeline import _loaded_models, _root
         try:
-            list_local_models(base_url, timeout=5)
-        except PipelineError:
+            version = requests.get(f"{_root(base_url)}/api/version", timeout=5).json().get("version", "?")
+        except Exception:  # noqa: BLE001
             return WARN, (f"server not running at {base_url}. Only needed for CV generation: "
-                          "LM Studio → Developer → Start Server")
-        loaded = [m for m, ctx in _loaded_models(base_url).items() if ctx is not None]
-        return PASS, ("running; loaded: " + (", ".join(loaded) if loaded else
-                                             "nothing yet (the CV generator loads its models)"))
+                          "start the Ollama app, or run `ollama serve`")
+        loaded = list(_loaded_models(base_url))
+        detail = (f"running (version {version}); loaded: "
+                  + (", ".join(loaded) if loaded else "nothing yet (the CV generator loads its models)"))
+        # 0.30.2 added the 1-bit (Q1_0) weights of the default writer, Bonsai 27B
+        try:
+            old = tuple(int(x) for x in version.split("-")[0].split(".")[:3]) < (0, 30, 2)
+        except ValueError:
+            old = False
+        if old:
+            return WARN, detail + "; update Ollama to 0.30.2 or newer, which the 1-bit Bonsai writer needs"
+        return PASS, detail
     return check
 
 
 def lm_checks(base_url: str) -> list[tuple[str, callable]]:
     cache: dict = {}
-    checks = [("LM Studio app", _lm_app), ("lms command-line tool", _lm_cli)]
-    checks += [(f"Model: {m}", _lm_model(m, cache)) for m in required_models()]
-    checks.append(("Local server", _lm_server(base_url)))
+    checks = [("Ollama program", _ol_app), ("Local server", _ol_server(base_url))]
+    checks += [(f"Model: {m}", _ol_model(m, cache, base_url)) for m in required_models()]
     return checks
 
 
@@ -401,11 +395,14 @@ def model_footprint() -> float | None:
         return None
     if not models:
         return None
-    need = required_models()
-    sizes = [models[m].get("sizeBytes", 0) / GB for m in need if m in models]
+    *chat, embed = required_models()
+    sizes = [s / GB for s in (_find_model(models, m) for m in chat) if s is not None]
     if not sizes:
         return None
-    return sum(sizes) + 0.5 * (len(need) - 1)
+    # Ollama runs the chat models one at a time (it swaps the judge and the writer
+    # when both do not fit), so the largest one counts, plus its working memory and
+    # the embedding model, which stays loaded.
+    return max(sizes) + 0.5 + (_find_model(models, embed) or 0) / GB
 
 
 def _hw_python():
@@ -423,7 +420,7 @@ def _hw_cpu():
         import ctypes
         avx2 = bool(ctypes.windll.kernel32.IsProcessorFeaturePresent(40))  # PF_AVX2
         if not avx2:
-            return FAIL, f"{name}, {cores} threads; no AVX2, which LM Studio requires on x86"
+            return WARN, f"{name}, {cores} threads; no AVX2, so models run very slowly on the CPU"
         return PASS, f"{name}, {cores} threads, AVX2 supported"
     return PASS, f"{name}, {cores} threads"
 
@@ -435,16 +432,17 @@ def _hw_ram():
     total, avail = ram[0] / GB, ram[1] / GB
     detail = f"{total:.1f} GB total, {avail:.1f} GB free now"
     if total < 8:
-        return FAIL, detail + "; LM Studio needs at least 8 GB (16 GB recommended)"
+        return FAIL, detail + "; the local models need at least 8 GB (16 GB recommended)"
     if total < 15:
-        return WARN, detail + "; 16 GB is recommended for LM Studio"
+        return WARN, detail + "; 16 GB is recommended for the local models"
     return PASS, detail
 
 
 def _hw_gpu():
     gpus = _gpus()
     need = model_footprint()
-    need_s = f"the CV models need about {need:.1f} GB" if need else "model size unknown"
+    need_s = (f"the largest CV model needs about {need:.1f} GB (Ollama runs the judge and writer "
+              "one at a time)") if need else "model size unknown"
     if not gpus:
         return WARN, f"no GPU found; models run on the CPU, which is much slower ({need_s})"
     best = max((v for _n, v in gpus if v), default=None)
@@ -458,7 +456,7 @@ def _hw_gpu():
 
 
 def _hw_disk():
-    paths = {"data folder": data_dir(), "LM Studio models": Path.home() / ".lmstudio" / "models"}
+    paths = {"data folder": data_dir(), "Ollama models": Path(os.environ.get("OLLAMA_MODELS") or Path.home() / ".ollama" / "models")}
     worst, parts = PASS, []
     for label, p in paths.items():
         if not p.exists():
@@ -504,7 +502,7 @@ def _one(group: str, name: str, fn) -> Result:
 
 
 def run(groups=GROUPS, on_result=None, cancelled: threading.Event | None = None,
-        base_url: str = "http://localhost:1234/v1", sec_email: str = "") -> list[Result]:
+        base_url: str = "http://localhost:11434", sec_email: str = "") -> list[Result]:
     """Run the chosen groups; on_result(Result) is called as each check finishes.
     API checks run in parallel (they wait on the network); the rest in order."""
     stop = cancelled or threading.Event()
@@ -527,7 +525,7 @@ def run(groups=GROUPS, on_result=None, cancelled: threading.Event | None = None,
                     if r is not None:
                         done(r)
         else:
-            checks = lm_checks(base_url) if group == "LM Studio" else hw_checks()
+            checks = lm_checks(base_url) if group == "Ollama" else hw_checks()
             for name, fn in checks:
                 if stop.is_set():
                     break

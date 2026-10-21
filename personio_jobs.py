@@ -80,8 +80,27 @@ class PersonioFeeds:
                 continue
             if resp.status_code != 200 or b"<workzag-jobs" not in resp.content[:400]:
                 continue
-            return self._parse(c, base, resp.content)
+            jobs = self._parse(c, base, resp.content)
+            if any(not j.description for j in jobs):
+                self._fill_descriptions(c, base, jobs)
+            return jobs
         return None
+
+    def _fill_descriptions(self, c: PersonioCompany, base: str, jobs: list[Job]) -> None:
+        """An ad written only in German is in the English feed with its title but no
+        text (16 Personio jobs had empty descriptions, 2026-10-21); the feed in the
+        company's own language has it."""
+        self.limiter.wait()
+        try:
+            resp = self.session.get(f"{base}/xml", timeout=20, allow_redirects=False)
+        except requests.RequestException:
+            return
+        if resp.status_code != 200 or b"<workzag-jobs" not in resp.content[:400]:
+            return
+        own = {j.job_id: j.description for j in self._parse(c, base, resp.content)}
+        for j in jobs:
+            if not j.description:
+                j.description = own.get(j.job_id, "")
 
     @staticmethod
     def _parse(c: PersonioCompany, base: str, xml_bytes: bytes) -> list[Job]:

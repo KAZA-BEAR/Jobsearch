@@ -8,9 +8,9 @@ Word banks miss paraphrases ("control engineering" vs "Control Systems",
 vectors by an embedding model and compared by cosine similarity, so texts with
 the same meaning match even when they share no words.
 
-The model is nomic-embed-text-v1.5 served by LM Studio's OpenAI-compatible
-/v1/embeddings endpoint, called over urllib like the chat models (no new
-dependencies). Nomic expects task prefixes: "search_query: " for what is looked
+The model is nomic-embed-text (v1.5) served by Ollama's /api/embed endpoint
+(or /v1/embeddings on another OpenAI-compatible server), called over urllib like
+the chat models (no new dependencies). Nomic expects task prefixes: "search_query: " for what is looked
 for (the requirement) and "search_document: " for what is searched (profile
 lines). Vectors are cached on disk, so profile lines are embedded once.
 
@@ -30,7 +30,7 @@ import os
 import urllib.request
 from pathlib import Path
 
-EMBED_MODEL = os.environ.get("ATS_EMBED_MODEL", "text-embedding-nomic-embed-text-v1.5")
+EMBED_MODEL = os.environ.get("ATS_EMBED_MODEL", "nomic-embed-text")
 _cache: dict | None = None
 
 
@@ -69,21 +69,25 @@ def embed(texts: list, base_url: str, model: str = EMBED_MODEL, timeout: int = 3
     cache = _load_cache()
     key = lambda t: hashlib.sha1(f"{model}\n{t}".encode("utf-8")).hexdigest()
     todo = [t for t in dict.fromkeys(texts) if key(t) not in cache]
+    base = base_url.rstrip("/")
+    # Ollama's own endpoint, or the OpenAI-style one when the address ends in /v1
+    openai = base.endswith("/v1")
     for i in range(0, len(todo), 64):
         batch = todo[i:i + 64]
         req = urllib.request.Request(
-            f"{base_url.rstrip('/')}/embeddings",
+            f"{base}/embeddings" if openai else f"{base}/api/embed",
             data=json.dumps({"model": model, "input": batch}).encode("utf-8"),
             headers={"content-type": "application/json"}, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))["data"]
+                data = json.loads(resp.read().decode("utf-8"))
+            vectors = ([d["embedding"] for d in sorted(data["data"], key=lambda d: d["index"])]
+                       if openai else data["embeddings"])
         except Exception as e:  # noqa: BLE001 - any failure means "no embeddings"
             raise EmbedError(f"embedding model '{model}' not available at {base_url}: {e}")
-        for item in data:
-            v = item["embedding"]
+        for text, v in zip(batch, vectors):
             n = math.sqrt(sum(x * x for x in v)) or 1.0
-            cache[key(batch[item["index"]])] = [x / n for x in v]
+            cache[key(text)] = [x / n for x in v]
     if todo:
         _save_cache()
     return [cache[key(t)] for t in texts]

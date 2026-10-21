@@ -1,6 +1,6 @@
 requests>=2.31.0
 pyinstaller>=6.3.0
-# No AI SDK needed - LM Studio's local OpenAI-compatible endpoint is called over
+# No AI SDK needed - Ollama's local API is called over
 # plain urllib (zero extra dependencies).
 
 # jobspy_provider.py (LinkedIn/Indeed/Glassdoor/ZipRecruiter fallback search)

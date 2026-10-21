@@ -35,7 +35,7 @@ from eu_student_jobs import (MARKETS, KINDS, EuresProvider, classify, is_student
                              ADZUNA_EUROPE, ADZUNA_EU_DEFAULTS, keep_adzuna_europe)
 from ats_pipeline import (
     DEFAULT_BACKEND, DEFAULT_BASE_URL, DEFAULT_LOCAL_MODELS, DEFAULT_WRITER,
-    PipelineError, list_local_models, run as ats_run,
+    PipelineError, _same_model, list_local_models, run as ats_run,
 )
 from ats_regions import DEFAULT_REGION, REGIONS as ATS_REGIONS
 from company_radar import (
@@ -1942,28 +1942,31 @@ class App(tk.Tk):
         top = ttk.Frame(page)
         top.pack(fill="x")
 
-        cv = ttk.LabelFrame(top, text=" CV generator (LM Studio) ", padding=10)
+        cv = ttk.LabelFrame(top, text=" CV generator (Ollama) ", padding=10)
         cv.pack(side="left", fill="both", expand=True, padx=(0, 10))
         pad = dict(sticky="w", pady=3)
         # Judge: reads requirements, fact-checks and edits CV bullets. Writer: writes the
         # cover letter and recruiter message (comma-separate several to draft in
-        # parallel). The pipeline loads both in LM Studio by itself.
+        # parallel). The pipeline loads both in Ollama by itself.
         rows = (("Judge model", "ats_model", DEFAULT_LOCAL_MODELS),
                 ("Letter writer", "ats_writer", DEFAULT_WRITER),
-                ("Server", "ats_base_url", "http://localhost:1234/v1"))
+                ("Server", "ats_base_url", DEFAULT_BASE_URL))
         for i, (label, attr, default) in enumerate(rows):
             ttk.Label(cv, text=label).grid(row=i, column=0, **pad)
             var = tk.StringVar(value=default)
             setattr(self, attr, var)
-            ttk.Entry(cv, textvariable=var, width=30).grid(row=i, column=1, padx=8, **pad)
+            # wide enough for "hf.co/prism-ml/Bonsai-27B-gguf:Q1_0"
+            ttk.Entry(cv, textvariable=var, width=38).grid(row=i, column=1, padx=8, **pad)
         ttk.Button(cv, text="Detect local models", command=self._ats_detect).grid(
             row=0, column=2, **pad)
+        ttk.Label(cv, text="Ollama model names; download one with: ollama pull <name>",
+                  style="Muted.TLabel").grid(row=4, column=1, columnspan=2, padx=8, sticky="w")
         ttk.Label(cv, text="Profile").grid(row=3, column=0, **pad)
         # The shared lookup: the file picked last time, then the data dir and the
         # .exe's folder. "Next to __file__" inside the .exe is the temporary bundle,
         # which only ever holds the profile as it was at build time.
         self.ats_profile_path = tk.StringVar(value=str(default_profile_path()))
-        ttk.Entry(cv, textvariable=self.ats_profile_path, width=30).grid(
+        ttk.Entry(cv, textvariable=self.ats_profile_path, width=38).grid(
             row=3, column=1, padx=8, **pad)
         ttk.Button(cv, text="Browse…", command=self._ats_browse_profile).grid(row=3, column=2, **pad)
 
@@ -1998,7 +2001,7 @@ class App(tk.Tk):
                        command=lambda g=group: self.run_checks((g,))).pack(side="left", padx=(6, 0))
         ttk.Button(bar, text="Copy report", command=self._copy_checks).pack(side="right")
         self.tests_summary = tk.StringVar(
-            value="Checks that every job source answers, LM Studio has the CV models, and "
+            value="Checks that every job source answers, Ollama has the CV models, and "
                   "this PC can run them. Nothing is changed or stored.")
         ttk.Label(tab, textvariable=self.tests_summary, foreground=self.MUTED).pack(
             anchor="w", pady=(6, 4))
@@ -2563,9 +2566,21 @@ class App(tk.Tk):
         if models:
             if not self.ats_model.get().strip():     # keep a model list already entered
                 self.ats_model.set(models[0])
-            self.log(f"[ATS] Local models: {', '.join(models)}")
+            self.log(f"[ATS] Ollama models: {', '.join(models)}")
         else:
-            self.log("[ATS] Server reachable but no model loaded.")
+            self.log("[ATS] Ollama is running but has no models; run `ollama pull <model>`.")
+        # the judge and writer as entered, against what is downloaded
+        wanted = [m.strip() for m in f"{self.ats_model.get()},{self.ats_writer.get()}".split(",")
+                  if m.strip()]
+        missing = [m for m in dict.fromkeys(wanted) if not any(_same_model(m, h) for h in models)]
+        if missing:
+            messagebox.showwarning(
+                "Models not downloaded",
+                "Ollama does not have:\n\n" + "\n".join(missing)
+                + "\n\nDownload them in a terminal:\n\n"
+                + "\n".join(f"ollama pull {m}" for m in missing))
+        else:
+            self.log("[ATS] The judge and the letter writer are both downloaded.")
 
     def _ats_browse_profile(self) -> None:
         path = filedialog.askopenfilename(
@@ -2769,7 +2784,7 @@ class App(tk.Tk):
         self.status.set("ATS Tailor running…")
         self.log("[ATS] Generation started — the model only rewords your experience bullets"
                  + (" and writes the cover letter" if cover else "")
-                 + "; expect 1-3 minutes on a 7B model. The window will not freeze.")
+                 + "; expect 2-6 minutes with the default models. The window will not freeze.")
 
     def _country_grid(self, parent, row: int, col: int, codes, preset) -> dict:
         frame = ttk.Frame(parent)
@@ -3440,6 +3455,34 @@ def ats_headless(argv: list) -> int:
             return 1
 
 
+def _install_crash_log():
+    """The windowed .exe has no console, so whatever ended the app left no trace (it
+    closed on the New companies page, 2026-10-21, and could not be reproduced).
+    Python errors, errors in worker threads and window callbacks, and hard crashes
+    (faulthandler) go to crash.log in the data folder. A clean exit writes "closed
+    normally", so a run with no closing line was killed from outside."""
+    import atexit
+    import faulthandler
+    import time
+    path = _data_dir() / "crash.log"
+    try:
+        big = path.exists() and path.stat().st_size > 1_000_000
+        fh = open(path, "w" if big else "a", encoding="utf-8", buffering=1)
+    except OSError:
+        return None
+    stamp = lambda: time.strftime("%Y-%m-%d %H:%M:%S")
+    fh.write(f"\n=== started {stamp()} (pid {os.getpid()})\n")
+    faulthandler.enable(file=fh, all_threads=True)
+
+    def hook(kind, exc_type, exc, tb):
+        fh.write(f"--- {kind}, {stamp()}\n" + "".join(traceback.format_exception(exc_type, exc, tb)))
+    sys.excepthook = lambda t, e, tb: hook("unhandled error", t, e, tb)
+    threading.excepthook = lambda a: hook(f"error in thread {getattr(a.thread, 'name', '')}",
+                                          a.exc_type, a.exc_value, a.exc_traceback)
+    atexit.register(lambda: fh.write(f"=== closed normally {stamp()}\n"))
+    return hook
+
+
 if __name__ == "__main__":
     # The Windows scheduled task runs "EUJobSearch.exe --sweep": do the daily
     # sweep headless (no window) and exit.
@@ -3447,4 +3490,12 @@ if __name__ == "__main__":
         sys.exit(daily_sweep.headless(sys.argv[1:]))
     if "--ats" in sys.argv:
         sys.exit(ats_headless(sys.argv[1:]))
-    App().mainloop()
+    crash_hook = _install_crash_log()
+    app = App()
+    if crash_hook:
+        # Tk reports callback errors to stderr, which the .exe does not have
+        def report(exc_type, exc, tb):
+            crash_hook("error in a window callback", exc_type, exc, tb)
+            tk.Tk.report_callback_exception(app, exc_type, exc, tb)
+        app.report_callback_exception = report
+    app.mainloop()

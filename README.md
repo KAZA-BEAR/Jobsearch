@@ -17,7 +17,7 @@ and by deterministic code checks before it reaches a document.
 - [Features](#features)
 - [Requirements](#requirements)
 - [Installation](#installation)
-- [Local models (LM Studio)](#local-models-lm-studio)
+- [Local models (Ollama)](#local-models-ollama)
 - [Your profile (`profile.json`)](#your-profile-profilejson)
 - [Using the app](#using-the-app)
 - [Command line](#command-line)
@@ -76,7 +76,7 @@ and by deterministic code checks before it reaches a document.
 - **Windows 10/11** (the app also runs from source on Linux/macOS; the scheduled
   daily task is Windows-only)
 - **Python 3.10+** with Tkinter (only to run from source or build the `.exe`)
-- **[LM Studio](https://lmstudio.ai)** for the local models (CV/letter generation only)
+- **[Ollama](https://ollama.com/download)** for the local models (CV/letter generation only)
 - **A LaTeX distribution** such as [MiKTeX](https://miktex.org) if you want PDFs
   generated automatically (otherwise you get `.tex` files)
 - For the default models: a GPU with **6 GB VRAM** (tested on an RTX 3050 6 GB; LM
@@ -120,41 +120,59 @@ python install_jobspy.py
 
 ---
 
-## Local models (LM Studio)
+## Local models (Ollama)
 
-Install LM Studio and download these models (search for them in LM Studio):
+Install Ollama and download these models with `ollama pull <model>`:
 
 | Role | Model | File |
 |---|---|---|
-| **Judge**: requirements, gap check, CV bullet edits, fact-check | `qwen/qwen3-4b-2507` (Qwen3-4B-Instruct-2507) | Q4_K_M, ~2.5 GB |
-| **Letter writer**: cover letter and recruiter message | `prism-ml/bonsai-27b` (Bonsai-27B) | Q1_0, ~3.8 GB |
-| **Embeddings**: meaning-based requirement matching | `text-embedding-nomic-embed-text-v1.5` | ~0.1 GB |
+| **Judge**: requirements, gap check, CV bullet edits, fact-check | `qwen3:4b-instruct-2507-q4_K_M` (Qwen3-4B-Instruct-2507) | Q4_K_M, ~2.5 GB |
+| **Letter writer**: cover letter and recruiter message | `hf.co/prism-ml/Bonsai-27B-gguf:Q1_0` (Bonsai-27B, from Hugging Face) | Q1_0, ~3.8 GB |
+| **Embeddings**: meaning-based requirement matching | `nomic-embed-text` (v1.5) | ~0.3 GB |
 
 The two jobs are split on purpose: the small judge models invented several letter
 sentences per job for the fact-check to delete, so a larger model writes and the small one
 checks. The writer runs at a low temperature (0.1) so it sticks to the facts.
 
-Start LM Studio's local server (Developer tab → Start Server, default
-`http://localhost:1234/v1`). **You do not need to load the models yourself:** before
-each run the app loads the judge and the writer with LM Studio's `lms` tool, with a
-6144-token context each, and unloads other chat models to make room on the GPU. The
-embedding model loads on first use. To use other models, change **Judge model** and
+```bash
+ollama pull qwen3:4b-instruct-2507-q4_K_M
+ollama pull hf.co/prism-ml/Bonsai-27B-gguf:Q1_0
+ollama pull nomic-embed-text
+```
+
+Ollama runs its server in the background once installed (default
+`http://localhost:11434`; otherwise start the Ollama app or run `ollama serve`).
+**You do not need to load the models yourself:** every request tells Ollama the context
+to use (6144 tokens per model, `MODEL_CONTEXT` in `ats_pipeline.py`), and before each
+run the app checks that both models are downloaded (it stops with the `ollama pull`
+command if not), unloads other chat models to make room on the GPU and loads the judge;
+the writer loads on its first call. Thinking is switched off (`think: false`). The
+embedding model loads on first use. Ollama **0.30.2 or newer** is needed for Bonsai's
+1-bit weights (the health check warns about older versions). To use other models, change **Judge model** and
 **Letter writer** under Settings for the session, or set `ATS_MODELS` / `ATS_WRITER`
 (see [Configuration](#configuration)) to change the defaults; on the command line use
 `--model` / `--writer`.
 
 Notes from testing on an RTX 3050 (6 GB):
-- One job takes about **2½–5½ minutes** (140–340 s in October 2026 tests) with the
-  default models, most of it the 27B writer and the per-sentence fact-check. Each run's
-  `run_log.txt` shows where the time went. The first call to the writer in a run varies
-  most (20–150 s): on a 6 GB GPU LM Studio moves model layers between the GPU and system
-  memory when it switches from the judge to the writer.
+- One job takes about **2½–3½ minutes** with Ollama (154 s and 192 s on 2026-10-21;
+  140–340 s with LM Studio before), most of it the judge's fact-checks and the 27B
+  writer's two drafts (26–37 s each). Each run's `run_log.txt` shows where the time went.
+- The judge (3.6 GB with its context) and the writer (4.9 GB, about a quarter of it in
+  system memory) do not fit on a 6 GB GPU together, so Ollama swaps them: about 5 s to
+  bring back the judge and 7 s for the writer each time, already included above.
 - Bonsai-27B is a 1-bit (Q1_0) model on the Qwen3.5 architecture and runs fine. Other
   **Qwen3.5**-architecture models at normal quantisations (e.g. Qwen3.5 4B) ran at under
   2 tokens/s on this GPU — avoid them.
-- A small writer such as `llama-3.2-3b-instruct` is much faster, but more of its letter
+- A small writer such as `llama3.2:3b` is much faster, but more of its letter
   sentences are cut by the fact-check, so letters more often fall back to the plain
   version built from your profile.
+- Other writers worth trying in Ollama (October 2026; not yet tested in this app, the
+  makers' benchmark claims only): `gemma4:12b-it-qat` (7.0 GB, strong on German),
+  `ministral-3:8b` (6.0 GB, German supported, made for low temperatures) and, with
+  32 GB RAM, `gemma4:26b-a4b-it-qat` (14.4 GB, only 4B parameters active per token).
+  Compare them on the same jobs by the fact-check's deletions, the predictability score
+  and `run_log.txt`. **Ternary-Bonsai-2-27B** does not load in Ollama (its 2-bit format
+  is not supported).
 
 ---
 
@@ -237,7 +255,9 @@ of the sidebar, or schedule it under Settings → **Daily sweep…**.
    *CV style* (`ats`, `styled` or `both`), *Cover letter*, *Review plan first*,
    *Compile PDF*, the recruiter's name and extra context for the letter.
 3. The judge and letter-writer models are under **Settings** (*Judge model*,
-   *Letter writer*) — leave the defaults unless you use other models in LM Studio.
+   *Letter writer*, as Ollama model names) — leave the defaults unless you use other
+   models. **Detect local models** lists what Ollama has downloaded and names any judge
+   or writer that is missing, with the `ollama pull` command for it.
 4. Press **Generate**. With *Review plan first* ticked, a window shows which
    requirements you meet and which bullets may be reworded; untick bullets to keep them
    word for word, then **Write CV**.
@@ -253,6 +273,16 @@ in your profile"): a letter could only list unrelated experience.
 your field term, in any of the ads' languages (Mechatronik, mechatronica and mekatronik
 all count for "mechatronics"). EURES itself matches *any* word of a query, so without
 this "Werkstudent mechatronics" returned every Werkstudent ad.
+
+**Full job descriptions.** The generator works from the job description, so sources whose
+search results carry only a title or a teaser fetch each job's own page:
+LinkedIn (through JobSpy), MyCareersFuture and SmartRecruiters (for relevant titles),
+Max Planck (the full ad and the exact city), Personio ads written only in German (from
+the company's own-language feed), Lever (the task and requirement lists, not just the
+intro) and Workday (a job past the 30-details-per-search limit is fetched on a later
+search). A job found again keeps the longer description and its fit is rescored.
+TH Deggendorf's job pages were offline in October 2026 (the site was moving to
+hochschule-deggendorf.de), so that source reports an error until they are back.
 
 **New companies** finds employers three ways: **Scan funding** (US SEC Form D filings;
 investment vehicles such as "… Fund LP" or "a Series of …" are skipped), **Find employers**
@@ -293,10 +323,12 @@ selecting a row shows the full reason. **Copy report** puts the results on the c
 - *APIs*: each job source answers a small real search. Keyed sources are skipped
   without a key. JobSpy is
   only checked as installed, because a test scrape of LinkedIn risks a temporary block.
-- *LM Studio*: the app and its `lms` tool are installed, every model the CV generator
-  uses is downloaded, and the local server answers.
-- *Hardware*: 64-bit Python, AVX2, RAM, GPU memory compared with the models' size,
-  free disk space, and `pdflatex` for *Compile PDF*.
+- *Ollama*: the program is installed, the local server answers (with a warning below
+  version 0.30.2, which Bonsai needs), and every model the CV generator uses is
+  downloaded (listed only while the server runs).
+- *Hardware*: 64-bit Python, AVX2, RAM, GPU memory compared with the largest CV model
+  (Ollama runs the judge and the writer one at a time), free disk space, and `pdflatex`
+  for *Compile PDF*.
 
 The checks change nothing: no jobs are stored and no models are loaded.
 
@@ -308,7 +340,7 @@ The checks change nothing: no jobs are stored and no models are loaded.
 # CV + letter for one job, headless (same pipeline and defaults as the Generate button)
 EUJobSearch.exe --ats job.txt --region DE
 # other models: --model is the judge, --writer writes the letter
-EUJobSearch.exe --ats job.txt --model "qwen/qwen3-4b-2507" --writer "llama-3.2-3b-instruct"
+EUJobSearch.exe --ats job.txt --model "qwen3:4b-instruct-2507-q4_K_M" --writer "llama3.2:3b"
 
 # Daily sweep (what the scheduled Windows task runs)
 EUJobSearch.exe --sweep
@@ -365,7 +397,7 @@ job ad ──► 1  requirements (quote-verified) + job title/company
 ```
 
 The recruiter message is written before the letter on purpose: both prompts start with
-the same rules, style guide, job brief and facts, so LM Studio's prompt cache lets the
+the same rules, style guide, job brief and facts, so Ollama's prompt cache lets the
 letter skip re-reading about 1,700 tokens. Every step that needs no model (the repairs,
 clean-up, ordering) runs before any extra call to the slow 27B writer.
 
@@ -391,7 +423,17 @@ clean-up, ordering) runs before any extra call to the slow 27B writer.
 - the same place named in every sentence ("As a … at …, I …" → "There, I also …"), or
   twice in one sentence; your courses mentioned twice
 - recruiter messages with a run-on question, a missing comma, or a title noun where a
-  verb belongs ("approach Integration LiDAR data" → "approach integrating …")
+  verb belongs ("approach Integration LiDAR data" → "approach integrating …"), and two
+  sentences in a row opening with "I" ("I wrote … at SOCO …" → "At SOCO …, I wrote …")
+- the job title with no noun after it or with its gender tag ("applying for the
+  Werkstudent - Lebensdauertest (all genders) at …" → "… Lebensdauertest position at …")
+- a short letter topped up with courses unrelated to the job: the added courses come
+  from the degree whose coursework matches the requirements you meet (B.Sc *Power
+  Electronics* for a power-electronics job), else from your current degree
+- your job title read as a place ("… at Student Assistant (SHK) at Robotics Lab" → "… as a
+  Student Assistant (SHK) at the Robotics Lab"); titles that already say what they are
+  ("Masterarbeit: …", "Internships: …") get no extra "position"; project names that are
+  not plain titles are quoted
 - CV bullets that drop a number, tool or action verb, add buzzwords, or repeat words
 
 Job titles and company names with abbreviations ("Stud. Assistant", "H. & W. … GmbH",
@@ -400,7 +442,7 @@ Job titles and company names with abbreviations ("Stud. Assistant", "H. & W. …
 **Writing style.** Prompts follow a "write like a person" style guide (plain words,
 varied sentence length, no stock AI phrases, no lists of three). `report.md` includes a
 **predictability score** (0–100) from sentence rhythm, repeated openings, stock phrases
-and — for model-written sentences — their real perplexity from LM Studio. It is an
+and — for model-written sentences — their real perplexity from Ollama. It is an
 estimate, not an AI-detector result.
 
 ---
@@ -447,7 +489,9 @@ For a signature and photo, put `sig.png` and `profile_pic.png` in
 **Data folder:** `%APPDATA%\EUJobSearch` for the `.exe`; the project folder when run from
 source. Contains the job database (`robotics_jobs.db`), `company_radar.db`,
 `sweep_config.json`, `sweep_state.json`, `settings.json` (remembered profile path, API
-keys, SEC contact email, discovery options), `embed_cache.json` and `discovery_cache.json`.
+keys, SEC contact email, discovery options), `embed_cache.json`, `discovery_cache.json`
+and `crash.log` (each start and normal close, and the traceback of any error, since the
+`.exe` has no console).
 Generated CVs and letters go to `ats_outputs\` in the project folder instead (see
 [Output files](#output-files)).
 
@@ -455,11 +499,12 @@ Generated CVs and letters go to `ats_outputs\` in the project folder instead (se
 
 | Variable | Purpose |
 |---|---|
-| `ATS_MODELS` | judge model, default `qwen/qwen3-4b-2507` |
-| `ATS_WRITER` | letter-writer model(s), default `prism-ml/bonsai-27b`; comma-separate several to draft in parallel |
-| `ATS_BASE_URL` | OpenAI-compatible server, default `http://localhost:1234/v1` |
-| `ATS_MODEL` | model used when the judge field is empty (default: the one LM Studio has loaded) |
-| `ATS_EMBED_MODEL` | embedding model, default `text-embedding-nomic-embed-text-v1.5` |
+| `ATS_MODELS` | judge model, default `qwen3:4b-instruct-2507-q4_K_M` |
+| `ATS_WRITER` | letter-writer model(s), default `hf.co/prism-ml/Bonsai-27B-gguf:Q1_0`; comma-separate several to draft in parallel |
+| `ATS_BACKEND` | `ollama` (default), or `openai` for another OpenAI-compatible server (vLLM, llama.cpp, LM Studio) |
+| `ATS_BASE_URL` | model server, default `http://localhost:11434` (Ollama); with `openai`, the address ending in `/v1` |
+| `ATS_MODEL` | model used when the judge field is empty (default: the first model Ollama has downloaded) |
+| `ATS_EMBED_MODEL` | embedding model, default `nomic-embed-text` |
 | `JOBSEARCH_DATA_DIR` | override the data folder |
 | `JOBS_DB` | override the job database path |
 | `USAJOBS_API_KEY`, `USAJOBS_EMAIL`, `ADZUNA_APP_ID`, `ADZUNA_APP_KEY` | US / Asia sources |
@@ -475,12 +520,12 @@ Generated CVs and letters go to `ats_outputs\` in the project folder instead (se
 | `ats_plan.py` | profile check, requirement extraction, gap analysis, rewrite plan |
 | `ats_checks.py` | all deterministic checks, keyword and style analysis |
 | `ats_prompts.py` | prompts and JSON schemas for the model |
-| `ats_embed.py` | meaning-based requirement matching via LM Studio embeddings |
+| `ats_embed.py` | meaning-based requirement matching via Ollama embeddings |
 | `ats_latex.py` | LaTeX templates for CVs and letters |
 | `ats_regions.py` | per-market conventions (photo, date of birth, nationality) |
 | `fit_score.py` | 0–100 fit score and profile lookup |
 | `daily_sweep.py` | once-a-day sweep and Windows task |
-| `system_checks.py` | the health checks (Settings): API, LM Studio and hardware |
+| `system_checks.py` | the health checks (Settings): API, Ollama and hardware |
 | `linkedin_jobs.py` | job model, SQLite store, shared HTTP helpers, LinkedIn APIs |
 | `eu_student_jobs.py` | EURES and student-job classification |
 | `robotics_track.py` | PhD positions (EURES doctoral filter) and employer ATS boards |
@@ -497,23 +542,25 @@ Generated CVs and letters go to `ats_outputs\` in the project folder instead (se
 
 | Problem | Fix |
 |---|---|
-| "Could not reach http://localhost:1234" | start LM Studio's server (Developer tab → Start Server) |
-| "Not downloaded in LM Studio: …" | download the named model in LM Studio |
-| "lms tool was not found" | install LM Studio's CLI (`~\.lmstudio\bin\lms.exe`) or load the models manually |
+| "Could not reach http://localhost:11434" | start Ollama (the Ollama app, or `ollama serve`) |
+| "Could not reach http://localhost:1234/v1" | an old LM Studio setting: remove the `ATS_BASE_URL` and `ATS_BACKEND` environment variables, or set the Settings → *Server* field to `http://localhost:11434` |
+| "Not downloaded in Ollama: …" | run the `ollama pull …` command it names |
 | A model loads but is extremely slow | it is probably a Qwen3.5-architecture model at a normal quantisation — use the defaults |
-| A job takes several minutes | 2½–5½ minutes is normal with the 27B writer on a 6 GB GPU; `run_log.txt` in the output folder lists every model call with its time. A smaller writer is faster but its letters lose more to the fact-check |
-| "answer ran past its … token limit" | raise the model's context in LM Studio to 8k+ |
+| A job takes several minutes | 2½–3½ minutes is normal with the 27B writer on a 6 GB GPU; `run_log.txt` in the output folder lists every model call with its time. A smaller writer is faster but its letters lose more to the fact-check |
+| "answer ran past its … token limit" | raise the model's context in `MODEL_CONTEXT` (`ats_pipeline.py`) to 8k+ |
 | Cover letter "assembled from profile.json" | the writer's draft lost too much to the fact-check; `report.md` shows the draft and the reason. The letter is true but plain — personalise it |
 | "no cover letter: none of the required skills are in your profile" | intentional: the CV is still written; a letter would have nothing relevant to say |
 | No PDFs | install MiKTeX/TeX Live and tick *Compile PDF*; missing packages install on first use |
 | "EUJobSearch.exe is running" during build | close the app first |
+| The app closed by itself | read `crash.log` in the data folder: a traceback means an error (report it); "started" with no "closed normally" means the process was ended from outside |
+| "database disk image is malformed" | close the app and restore `robotics_jobs.db` from a backup copy. Run only one copy of the app at a time: two copies writing the same database can damage it |
 
 ---
 
 ## Privacy
 
 Everything runs locally: job searches call public job APIs, and the CV/letter models run
-in LM Studio on your machine. Nothing from your profile is sent to an online AI service.
+in Ollama on your machine. Nothing from your profile is sent to an online AI service.
 
 **Before pushing this project to GitHub**, keep your personal data out of the repository.
 The included `.gitignore` already excludes `profile.json` and its backups, generated

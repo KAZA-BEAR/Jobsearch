@@ -25,6 +25,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import html
 import os
 import re
 import sys
@@ -352,6 +353,13 @@ class AdzunaProvider:
 # MyCareersFuture — Singapore, keyless
 # --------------------------------------------------------------------------
 
+def _html_text(raw: str) -> str:
+    """HTML to plain text, one line per paragraph or list item."""
+    text = re.sub(r"(?i)<\s*(br|/p|/li|/h\d|/div)\b[^>]*>", "\n", raw or "")
+    text = html.unescape(re.sub(r"<[^>]+>", " ", text))
+    return "\n".join(" ".join(l.split()) for l in text.splitlines() if l.strip())
+
+
 class MyCareersFutureProvider:
     """Singapore's national job portal.
 
@@ -428,10 +436,32 @@ class MyCareersFutureProvider:
             if on_log:
                 on_log(msg)
             for r in results:
-                out.append(self._to_job(r))
+                job = self._to_job(r)
+                # Search results carry no description (all 83 Singapore jobs in the
+                # database had none, 2026-10-21); the job's own page has it. Only for
+                # titles the filters would keep, so a search costs a few requests more.
+                if not job.description and MECHATRONICS_MARKERS.search(job.title) \
+                        and not SENIOR_MARKERS.search(job.title):
+                    job.description = self._details(r.get("uuid") or "", on_log)
+                out.append(job)
             if len(results) < 100:
                 break
         return out
+
+    DETAIL_URL = "https://api.mycareersfuture.gov.sg/v2/jobs/{}"
+
+    def _details(self, uuid_: str, on_log=None) -> str:
+        """The job's full description from its own page, as plain text."""
+        if not uuid_:
+            return ""
+        self.limiter.wait()
+        try:
+            resp = request_with_retry(self.session, "GET", self.DETAIL_URL.format(uuid_), tries=2)
+            return _html_text(resp.json().get("description") or "")[:4000]
+        except Exception as exc:  # noqa: BLE001 - the job is kept without it
+            if on_log:
+                on_log(f"[mcf] description for {uuid_} failed: {exc}")
+            return ""
 
     @staticmethod
     def _to_job(r: dict) -> Job:
