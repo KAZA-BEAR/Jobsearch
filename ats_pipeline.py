@@ -508,7 +508,9 @@ def tailor_experience(profile, job_description, plan, lang, call, forbidden, log
                     break
             if not problems:
                 edited.append(new)
-                n_model += 1
+                # an edit that returns the bullet as it was is not a rewording: the
+                # report claimed "reworded" for CVs identical to profile.json (2026-11-05)
+                n_model += new.strip().rstrip(".") != bullet.strip().rstrip(".")
             elif pairs:
                 edited.append(checks.swap_terms(bullet, pairs))
                 n_swap += 1
