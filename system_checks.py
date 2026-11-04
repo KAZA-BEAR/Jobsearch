@@ -1,7 +1,7 @@
 """
 system_checks.py — health checks behind the app's Unit tests tab.
 
-Three groups, each check reporting pass / warn / fail / skip with a reason:
+Four groups, each check reporting pass / warn / fail / skip with a reason:
 
   APIs       every job source answers a small real request; keyed sources
              (USAJOBS, Adzuna, both free) are skipped when no key is set
@@ -9,9 +9,13 @@ Three groups, each check reporting pass / warn / fail / skip with a reason:
              model the CV generator needs is downloaded
   Hardware   64-bit Python, AVX2, RAM, GPU memory against the models' size,
              free disk space, and pdflatex for the Compile PDF option
+  Pipeline   the models really answer: embeddings rank by meaning, the judge
+             returns structured JSON, the writer writes, and a full CV + cover
+             letter run on a built-in sample job produces every file
 
-Run from the app only (Unit tests tab). No check changes anything: nothing is
-stored, and no model is loaded or unloaded.
+Run from the app only (Settings -> Health checks). Nothing is stored: the sample
+run writes to a temporary folder that is deleted afterwards. Only the Pipeline
+group loads models in Ollama (as the Generate button would).
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -32,7 +37,7 @@ import requests
 
 from linkedin_jobs import data_dir
 
-GROUPS = ("APIs", "Ollama", "Hardware")
+GROUPS = ("APIs", "Ollama", "Hardware", "Pipeline")
 PASS, WARN, FAIL, SKIP = "pass", "warn", "fail", "skip"
 GB = 1024 ** 3
 TIMEOUT = 20
@@ -250,11 +255,13 @@ def api_checks(sec_email: str = "") -> list[tuple[str, callable]]:
 # Ollama
 # --------------------------------------------------------------------------
 
-def required_models() -> list[str]:
-    """Chat models the CV generator loads, then the embedding model."""
+def required_models(judge: str = None, writer: str = None) -> list[str]:
+    """Chat models the CV generator loads (the ones set under Settings, else the
+    defaults), then the embedding model."""
     from ats_embed import EMBED_MODEL
     from ats_pipeline import DEFAULT_LOCAL_MODELS, DEFAULT_WRITER
-    chat = [m.strip() for m in f"{DEFAULT_LOCAL_MODELS},{DEFAULT_WRITER}".split(",") if m.strip()]
+    names = f"{judge or DEFAULT_LOCAL_MODELS},{writer or DEFAULT_WRITER}"
+    chat = [m.strip() for m in names.split(",") if m.strip()]
     return list(dict.fromkeys(chat)) + [EMBED_MODEL]
 
 
@@ -317,11 +324,148 @@ def _ol_server(base_url: str):
     return check
 
 
-def lm_checks(base_url: str) -> list[tuple[str, callable]]:
+def lm_checks(base_url: str, judge: str = None, writer: str = None) -> list[tuple[str, callable]]:
     cache: dict = {}
     checks = [("Ollama program", _ol_app), ("Local server", _ol_server(base_url))]
-    checks += [(f"Model: {m}", _ol_model(m, cache, base_url)) for m in required_models()]
+    checks += [(f"Model: {m}", _ol_model(m, cache, base_url))
+               for m in required_models(judge, writer)]
     return checks
+
+
+# --------------------------------------------------------------------------
+# Pipeline
+# --------------------------------------------------------------------------
+
+# Written around the skills a robotics profile names word for word, so the judge
+# finds proven requirements and the writer gets to draft a letter. Fictional employer.
+SAMPLE_JOB = """Position: Working Student Robotics Software (ROS2)
+Company:  Sample Robotics GmbH
+Location: Munich, Germany
+Type:     Working student, 15-20 h/week
+
+We build autonomous mobile robots for warehouses. As a working student you help our
+navigation team develop and test robot software.
+
+Your tasks
+- Develop ROS2 packages in C++ and Python for our mobile robots
+- Test path planning and navigation with Nav2 in Gazebo simulation
+- Write and debug code under Linux (Ubuntu) and keep it under version control with Git
+
+Your profile
+- Enrolled in a Master's programme in mechatronics, robotics, electrical engineering or similar
+- Experience with ROS2, C++ and Python
+- Hands-on experience with Gazebo simulation
+- Good English; German is a plus
+"""
+
+
+def _pl_ready(base_url: str, models: list[str]) -> None:
+    """Skip when Ollama is not running; fail (via PipelineError) when a model is missing."""
+    have = downloaded_models(base_url)
+    if have is None:
+        raise Skip("Ollama is not running; start the Ollama app or `ollama serve`")
+    missing = [m for m in models if _find_model(have, m) is None]
+    if missing:
+        from ats_pipeline import PipelineError
+        raise PipelineError("not downloaded: " + ", ".join(missing)
+                            + "; run " + " and ".join(f"ollama pull {m}" for m in missing))
+
+
+def _pl_embed(base_url: str):
+    def check():
+        from ats_embed import EMBED_MODEL, embed
+        _pl_ready(base_url, [EMBED_MODEL])
+        q, near, far = embed(["search_query: ROS2 robot navigation",
+                              "search_document: Nav2 path planning for a mobile robot",
+                              "search_document: baking sourdough bread at home"], base_url)
+        cos = lambda a, b: sum(x * y for x, y in zip(a, b)) / (
+            (sum(x * x for x in a) ** 0.5) * (sum(y * y for y in b) ** 0.5) or 1)
+        s_near, s_far = cos(q, near), cos(q, far)
+        detail = f"{len(q)}-dim vectors; related {s_near:.2f} vs unrelated {s_far:.2f}"
+        if s_near <= s_far:
+            return FAIL, detail + ": related text did not score higher, so requirement matching is unreliable"
+        return PASS, detail
+    return check
+
+
+def _pl_judge(base_url: str, judge: str):
+    def check():
+        from ats_pipeline import call_model
+        _pl_ready(base_url, [judge])
+        schema = {"type": "object", "required": ["languages"],
+                  "properties": {"languages": {"type": "array", "items": {"type": "string"}}}}
+        raw = call_model('List the programming languages this job ad asks for. Answer as JSON.\n\n'
+                         'Ad: "You write robot software in C++ and Python under Linux."',
+                         model=judge, max_tokens=200, timeout=300, base_url=base_url,
+                         schema=schema, temperature=0)
+        try:
+            found = {s.strip().lower() for s in json.loads(raw)["languages"]}
+        except (ValueError, KeyError, TypeError, AttributeError):
+            return FAIL, f"{judge} did not return the requested JSON: {raw[:120]!r}"
+        if not {"c++", "python"} <= found:
+            return WARN, f"{judge} answered in JSON but listed {sorted(found)}, expected C++ and Python"
+        return PASS, f"{judge} returned valid JSON with C++ and Python"
+    return check
+
+
+def _pl_writer(base_url: str, writer: str):
+    def check():
+        from ats_pipeline import _preclean, call_model
+        names = [m.strip() for m in writer.split(",") if m.strip()]
+        _pl_ready(base_url, names)
+        parts = []
+        for m in names:
+            text = _preclean(call_model(
+                "Write one friendly sentence in which a mechatronics student says they "
+                "enjoy building robots. Only the sentence.",
+                model=m, max_tokens=120, timeout=600, base_url=base_url))
+            words = len(text.split())
+            if words < 5:
+                return FAIL, f"{m} gave no usable sentence: {text[:120]!r}"
+            parts.append(f"{m}: {words} words")
+        return PASS, "wrote a sentence; " + "; ".join(parts)
+    return check
+
+
+def _pl_full(base_url: str, judge: str, writer: str, profile_path: str):
+    def check():
+        import ats_pipeline
+        from ats_embed import EMBED_MODEL
+        writers = [m.strip() for m in writer.split(",") if m.strip()]
+        _pl_ready(base_url, [judge, *writers, EMBED_MODEL])
+        log: list[str] = []
+        with tempfile.TemporaryDirectory(prefix="jobsearch_check_") as tmp:
+            pkg, out = ats_pipeline.run(
+                SAMPLE_JOB, "DE", profile_path=Path(profile_path) if profile_path else None,
+                outputs_root=Path(tmp), style="both", model=judge, writers=writer,
+                base_url=base_url, cover=True, log=log.append)
+            files = {"cv_ats.tex", "cv_styled.tex", "report.md", "cover_letter_ats.tex",
+                     "cover_letter_styled.tex", "recruiter_message.txt"}
+            missing = sorted(f for f in files if not (out / f).is_file())
+        timing = next((line for line in reversed(log) if line.startswith("Model time")), "")
+        reqs = pkg.get("requirements") or []
+        proven = sum(r.get("status") in ("have", "alternative") for r in reqs)
+        detail = (f"sample job: {len(reqs)} requirements, {proven} proven; "
+                  f"letter {len(pkg.get('cover_letter', '').split())} words. {timing}")
+        if not pkg.get("cover_letter", "").strip() or missing:
+            return FAIL, (f"files missing: {', '.join(missing)}. " if missing else "") + detail + (
+                f" Issues: {'; '.join(pkg.get('issues') or [])}" if pkg.get("issues") else "")
+        if pkg.get("issues"):
+            return WARN, detail + f" Issues: {'; '.join(pkg['issues'])}"
+        return PASS, detail
+    return check
+
+
+def pipeline_checks(base_url: str, judge: str = None, writer: str = None,
+                    profile_path: str = None) -> list[tuple[str, callable]]:
+    from ats_pipeline import DEFAULT_LOCAL_MODELS, DEFAULT_WRITER
+    judge = ((judge or DEFAULT_LOCAL_MODELS).split(",")[0]).strip()
+    writer = (writer or DEFAULT_WRITER).strip()
+    # writer before judge: the full run starts with the judge, so it is loaded by then
+    return [("Embeddings rank by meaning", _pl_embed(base_url)),
+            ("Writer answers", _pl_writer(base_url, writer)),
+            ("Judge returns JSON", _pl_judge(base_url, judge)),
+            ("CV + letter on a sample job", _pl_full(base_url, judge, writer, profile_path))]
 
 
 # --------------------------------------------------------------------------
@@ -502,9 +646,11 @@ def _one(group: str, name: str, fn) -> Result:
 
 
 def run(groups=GROUPS, on_result=None, cancelled: threading.Event | None = None,
-        base_url: str = "http://localhost:11434", sec_email: str = "") -> list[Result]:
+        base_url: str = "http://localhost:11434", sec_email: str = "",
+        judge: str = None, writer: str = None, profile_path: str = None) -> list[Result]:
     """Run the chosen groups; on_result(Result) is called as each check finishes.
-    API checks run in parallel (they wait on the network); the rest in order."""
+    API checks run in parallel (they wait on the network); the rest in order.
+    `judge`, `writer` and `profile_path` are the Settings values (defaults if empty)."""
     stop = cancelled or threading.Event()
     results: list[Result] = []
 
@@ -525,7 +671,9 @@ def run(groups=GROUPS, on_result=None, cancelled: threading.Event | None = None,
                     if r is not None:
                         done(r)
         else:
-            checks = lm_checks(base_url) if group == "Ollama" else hw_checks()
+            checks = (lm_checks(base_url, judge, writer) if group == "Ollama" else
+                      pipeline_checks(base_url, judge, writer, profile_path)
+                      if group == "Pipeline" else hw_checks())
             for name, fn in checks:
                 if stop.is_set():
                     break

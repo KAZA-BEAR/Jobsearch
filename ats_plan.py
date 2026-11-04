@@ -486,11 +486,14 @@ def coverage(requirements: list) -> dict:
 
 
 # Words too common to count as a claimed skill on their own ("global", "analysis").
+# Packaging words too: "Nav2 framework" stayed "possibly" though Skills names Nav2, and
+# with no required skill proven the cover letter was skipped (Fraunhofer, 2026-11-04).
 _GENERIC = set("""global local general analysis analyse analyze testing support development
 knowledge programming systems system design research methods method technical technology
 technologies management maintenance strategies strategy efficiency scalability performance
 assessment environment environments application applications data field
-real world time multiple sensor sensors engineering engineer""".split())
+real world time multiple sensor sensors engineering engineer
+framework frameworks stack stacks library libraries toolkit toolkits toolchain""".split())
 
 
 def _backs(skill: str, line: str) -> bool:

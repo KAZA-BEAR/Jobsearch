@@ -330,8 +330,14 @@ selecting a row shows the full reason. **Copy report** puts the results on the c
 - *Hardware*: 64-bit Python, AVX2, RAM, GPU memory compared with the largest CV model
   (Ollama runs the judge and the writer one at a time), free disk space, and `pdflatex`
   for *Compile PDF*.
+- *Pipeline*: the models set above really work. The embedding model ranks a related
+  text above an unrelated one, the writer writes a sentence, the judge returns valid
+  JSON, and a full CV + cover letter run on a built-in sample job (a fictional ROS2
+  working-student ad) writes every file. Takes a few minutes; skipped when Ollama is
+  not running.
 
-The checks change nothing: no jobs are stored and no models are loaded.
+The checks store nothing: no jobs are saved, and the sample run writes to a temporary
+folder that is deleted afterwards. Only *Pipeline* loads models in Ollama.
 
 ---
 
@@ -527,7 +533,7 @@ Generated CVs and letters go to `ats_outputs\` in the project folder instead (se
 | `ats_regions.py` | per-market conventions (photo, date of birth, nationality) |
 | `fit_score.py` | 0–100 fit score and profile lookup |
 | `daily_sweep.py` | once-a-day sweep and Windows task |
-| `system_checks.py` | the health checks (Settings): API, Ollama and hardware |
+| `system_checks.py` | the health checks (Settings): API, Ollama, hardware and pipeline |
 | `linkedin_jobs.py` | job model, SQLite store, shared HTTP helpers, LinkedIn APIs |
 | `eu_student_jobs.py` | EURES and student-job classification |
 | `robotics_track.py` | PhD positions (EURES doctoral filter) and employer ATS boards |

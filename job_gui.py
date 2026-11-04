@@ -2003,8 +2003,9 @@ class App(tk.Tk):
                        command=lambda g=group: self.run_checks((g,))).pack(side="left", padx=(6, 0))
         ttk.Button(bar, text="Copy report", command=self._copy_checks).pack(side="right")
         self.tests_summary = tk.StringVar(
-            value="Checks that every job source answers, Ollama has the CV models, and "
-                  "this PC can run them. Nothing is changed or stored.")
+            value="Checks that every job source answers, Ollama has the CV models, this PC "
+                  "can run them, and the CV + letter pipeline works on a sample job "
+                  "(Pipeline loads the models; a few minutes). Nothing is stored.")
         ttk.Label(tab, textvariable=self.tests_summary, foreground=self.MUTED).pack(
             anchor="w", pady=(6, 4))
 
@@ -2054,13 +2055,18 @@ class App(tk.Tk):
         self.tests_tree.delete(*self.tests_tree.get_children())
         self._check_results.clear()
         self.tests_detail.set("")
-        self.tests_summary.set("Running… API checks take up to a minute.")
+        self.tests_summary.set("Running… API checks take up to a minute"
+                               + (", the Pipeline group a few minutes." if "Pipeline" in groups
+                                  else "."))
         base_url = self.ats_base_url.get().strip() or DEFAULT_BASE_URL
         sec_email = self.radar_email.get().strip()
+        judge, writer = self.ats_model.get().strip(), self.ats_writer.get().strip()
+        profile = self.ats_profile_path.get().strip()
 
         def task(w: Worker) -> None:
             results = system_checks.run(
                 groups, cancelled=w.cancelled, base_url=base_url, sec_email=sec_email,
+                judge=judge, writer=writer, profile_path=profile,
                 on_result=lambda r: self._ui(lambda r=r: self._add_check_result(r)))
             bad = [r for r in results if r.status in ("fail", "warn")]
             w.log(f"checks: {len(results)} run, "
