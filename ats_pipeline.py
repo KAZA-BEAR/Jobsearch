@@ -7,7 +7,7 @@ The CV is assembled from profile.json in code; the model (Ollama by default)
 only rewords the work-experience bullets toward the job's keywords, and writes
 an optional cover letter and recruiter message. Each request is ~2k tokens.
 
-Models: "judge,drafter,..." (default Qwen3-4B judge + Bonsai 27B writer, run in
+Models: "judge,drafter,..." (default Qwen3.5-4B judge + Gemma 4 12B writer, run in
 Ollama with a fixed context). The first model judges - requirements,
 fact-check, bullets, recruiter message; every listed model drafts the cover
 letter in parallel. Every draft is fact-checked by the model AND by the code
@@ -238,18 +238,24 @@ def list_local_models(base_url: str = None, timeout: int = 15, backend: str = DE
 
 # The judge: requirements, gap check, CV bullet edits and every fact-check. Override
 # with ATS_MODELS. (Until 2026-10-03 the default was the pair Qwen3-4B + Llama 3.2
-# 3B, both also drafting letters.) Names are Ollama's: `ollama pull <name>`.
-DEFAULT_LOCAL_MODELS = os.environ.get("ATS_MODELS", "qwen3:4b-instruct-2507-q4_K_M")
+# 3B, both also drafting letters; until 2026-11-05 Qwen3-4B-Instruct-2507, which gave
+# garbled requirement names - "3D-LiDing localization", a lone "c".) Names are
+# Ollama's: `ollama pull <name>`.
+DEFAULT_LOCAL_MODELS = os.environ.get("ATS_MODELS", "qwen3.5:4b")
 # Who writes the cover letter and recruiter message, separate from the judge (the
 # first model above), which keeps requirements, the fact-check and the CV edits. The
 # 3-4B judges invented 5-17 letter sentences per job for the fact-check to delete
 # (2026-10-03), so a larger model writes. Comma-separate several to draft in parallel.
-DEFAULT_WRITER = os.environ.get("ATS_WRITER", "hf.co/prism-ml/Bonsai-27B-gguf:Q1_0")
+# Gemma 4 12B replaced Bonsai 27B (1-bit) on 2026-11-05: on three test jobs no letter
+# needed padding from the profile (Bonsai: 2 of 3) and the letters named more of what
+# the job asks for, at about twice the run time (7.2 GB, partly in system memory).
+DEFAULT_WRITER = os.environ.get("ATS_WRITER", "gemma4:12b-it-qat")
 # Context each model runs with (sent as num_ctx on every request). A model's own
 # maximum (131072 for Llama) filled the GPU with working memory so the second
 # model could not load.
 MODEL_CONTEXT = {"qwen3:4b-instruct-2507-q4_K_M": 6144, "llama3.2:3b": 6144,
-                 "hf.co/prism-ml/Bonsai-27B-gguf:Q1_0": 6144}
+                 "hf.co/prism-ml/Bonsai-27B-gguf:Q1_0": 6144, "qwen3.5:4b": 6144,
+                 "gemma4:12b-it-qat": 6144}
 DEFAULT_CONTEXT = 6144
 
 

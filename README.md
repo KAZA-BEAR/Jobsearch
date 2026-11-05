@@ -127,8 +127,8 @@ Install Ollama and download these models with `ollama pull <model>`:
 
 | Role | Model | File |
 |---|---|---|
-| **Judge**: requirements, gap check, CV bullet edits, fact-check | `qwen3:4b-instruct-2507-q4_K_M` (Qwen3-4B-Instruct-2507) | Q4_K_M, ~2.5 GB |
-| **Letter writer**: cover letter and recruiter message | `hf.co/prism-ml/Bonsai-27B-gguf:Q1_0` (Bonsai-27B, from Hugging Face) | Q1_0, ~3.8 GB |
+| **Judge**: requirements, gap check, CV bullet edits, fact-check | `qwen3.5:4b` (Qwen3.5-4B) | ~3.3 GB |
+| **Letter writer**: cover letter and recruiter message | `gemma4:12b-it-qat` (Gemma 4 12B, QAT) | ~7.2 GB |
 | **Embeddings**: meaning-based requirement matching | `nomic-embed-text` (v1.5) | ~0.3 GB |
 
 The two jobs are split on purpose: the small judge models invented several letter
@@ -136,8 +136,8 @@ sentences per job for the fact-check to delete, so a larger model writes and the
 checks. The writer runs at a low temperature (0.1) so it sticks to the facts.
 
 ```bash
-ollama pull qwen3:4b-instruct-2507-q4_K_M
-ollama pull hf.co/prism-ml/Bonsai-27B-gguf:Q1_0
+ollama pull qwen3.5:4b
+ollama pull gemma4:12b-it-qat
 ollama pull nomic-embed-text
 ```
 
@@ -148,32 +148,39 @@ to use (6144 tokens per model, `MODEL_CONTEXT` in `ats_pipeline.py`), and before
 run the app checks that both models are downloaded (it stops with the `ollama pull`
 command if not), unloads other chat models to make room on the GPU and loads the judge;
 the writer loads on its first call. Thinking is switched off (`think: false`). The
-embedding model loads on first use. Ollama **0.30.2 or newer** is needed for Bonsai's
-1-bit weights (the health check warns about older versions). To use other models, change **Judge model** and
+embedding model loads on first use.
+To use other models, change **Judge model** and
 **Letter writer** under Settings for the session, or set `ATS_MODELS` / `ATS_WRITER`
 (see [Configuration](#configuration)) to change the defaults; on the command line use
 `--model` / `--writer`.
 
-Notes from testing on an RTX 3050 (6 GB):
-- One job takes about **2–3½ minutes** with Ollama (126–201 s over six jobs on
-  2026-10-21; 140–340 s with LM Studio before), most of it the judge's fact-checks and
-  the 27B writer's two drafts (25–42 s each). Each run's `run_log.txt` shows where the time went.
-- The judge (3.6 GB with its context) and the writer (4.9 GB, about a quarter of it in
-  system memory) do not fit on a 6 GB GPU together, so Ollama swaps them: about 5 s to
-  bring back the judge and 7 s for the writer each time, already included above.
-- Bonsai-27B is a 1-bit (Q1_0) model on the Qwen3.5 architecture and runs fine. Other
-  **Qwen3.5**-architecture models at normal quantisations (e.g. Qwen3.5 4B) ran at under
-  2 tokens/s on this GPU — avoid them.
+Notes from testing on an RTX 3050 (6 GB, 32 GB RAM), Ollama 0.40:
+- One job takes about **3½–5 minutes** (200–290 s over three jobs on 2026-11-05), most
+  of it the writer's two drafts (55–85 s each) and the judge's fact-checks. The first
+  run after Ollama starts takes several minutes longer while both models load from
+  disk. Each run's `run_log.txt` shows where the time went.
+- The writer (7.2 GB) does not fit on a 6 GB GPU, so part of it runs from system
+  memory; Ollama swaps it with the judge between steps (already included above).
+- Compared on the same three jobs (2026-11-05), against the previous pair (Qwen3-4B
+  judge + 1-bit Bonsai-27B writer, about 2–2½ minutes per job):
+  - Gemma 4 writer: no letter needed padding from your profile (Bonsai: 2 of 3), fewer
+    fact-check deletions, and the letters name more of what the job asks for (Docker,
+    Git, Linux for a test role; SLAM for a mapping thesis). Recruiter questions became
+    specific.
+  - Qwen3.5 judge: clean requirement names (Qwen3 gave "3D-LiDing localization" and a
+    lone "c"), and it points the letter at the right experience (ROS2 for a robotics
+    internship). It once marked required skills as nice-to-have in an ad stored as one
+    long line. For German ads it gave German skill names until the prompt repeated the
+    rule after the ad; any that still come back German are translated.
+- To go back to the faster pair, set **Judge model** to `qwen3:4b-instruct-2507-q4_K_M`
+  and **Letter writer** to `hf.co/prism-ml/Bonsai-27B-gguf:Q1_0` (Ollama **0.30.2 or
+  newer** for Bonsai's 1-bit weights).
 - A small writer such as `llama3.2:3b` is much faster, but more of its letter
   sentences are cut by the fact-check, so letters more often fall back to the plain
   version built from your profile.
-- Other writers worth trying in Ollama (October 2026; not yet tested in this app, the
-  makers' benchmark claims only): `gemma4:12b-it-qat` (7.0 GB, strong on German),
-  `ministral-3:8b` (6.0 GB, German supported, made for low temperatures) and, with
+- Not yet tested in this app: `ministral-3:8b` (6.0 GB, German supported) and, with
   32 GB RAM, `gemma4:26b-a4b-it-qat` (14.4 GB, only 4B parameters active per token).
-  Compare them on the same jobs by the fact-check's deletions, the predictability score
-  and `run_log.txt`. **Ternary-Bonsai-2-27B** does not load in Ollama (its 2-bit format
-  is not supported).
+  **Ternary-Bonsai-2-27B** does not load in Ollama (its 2-bit format is not supported).
 
 ---
 
@@ -507,8 +514,8 @@ Generated CVs and letters go to `ats_outputs\` in the project folder instead (se
 
 | Variable | Purpose |
 |---|---|
-| `ATS_MODELS` | judge model, default `qwen3:4b-instruct-2507-q4_K_M` |
-| `ATS_WRITER` | letter-writer model(s), default `hf.co/prism-ml/Bonsai-27B-gguf:Q1_0`; comma-separate several to draft in parallel |
+| `ATS_MODELS` | judge model, default `qwen3.5:4b` |
+| `ATS_WRITER` | letter-writer model(s), default `gemma4:12b-it-qat`; comma-separate several to draft in parallel |
 | `ATS_BACKEND` | `ollama` (default), or `openai` for another OpenAI-compatible server (vLLM, llama.cpp, LM Studio) |
 | `ATS_BASE_URL` | model server, default `http://localhost:11434` (Ollama); with `openai`, the address ending in `/v1` |
 | `ATS_MODEL` | model used when the judge field is empty (default: the first model Ollama has downloaded) |
