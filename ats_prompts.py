@@ -263,11 +263,11 @@ _QUESTION_START = re.compile(r"\s*(?:What|How|Which|Who|Could|Would|Can|Is|Are|D
 
 
 def cover_only_prompt(profile: dict, job: str, lang: str, gaps: str,
-                      facts: str = "", cited: bool = True) -> str:
+                      facts: str = "") -> str:
     """The letter prompt. `facts`: the numbered fact list ("F7: ...", "I1: ...") from
     the pipeline; every sentence must cite the IDs it uses, so it can be checked
-    against those facts alone. `cited` is kept for older callers; the prompt always
-    asks for citations, which the pipeline strips before anything is shown."""
+    against those facts alone. The pipeline strips the citations before anything is
+    shown."""
     return COVER.format(language=LANGUAGE_NAMES.get(lang, "English"),
                         gaps=gaps or "none listed", jd=job, style=STYLE,
                         claims=CLAIM_RULES, profile=facts or compact_profile(profile))

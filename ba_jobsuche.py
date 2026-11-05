@@ -16,23 +16,17 @@ Useful filters the other providers don't have:
 The search endpoint returns no description, so the provider fetches the detail
 record for the first `details` hits: that text feeds the fit score and the
 German-language check.
-
-Usage:
-    python ba_jobsuche.py search "Robotik" --where Straubing --radius 100
-    python ba_jobsuche.py search "Werkstudent Mechatronik" --where Regensburg --part-time --days 7
-    python ba_jobsuche.py search "Praktikum Robotik" --offer praktikum
 """
 
 from __future__ import annotations
 
-import argparse
 import base64
 import sys
 from urllib.parse import quote
 
 import requests
 
-from linkedin_jobs import Job, RateLimiter, Store, request_with_retry
+from linkedin_jobs import Job, RateLimiter, request_with_retry
 
 BASE = "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service"
 SEARCH = BASE + "/pc/v6/jobs"
@@ -159,41 +153,3 @@ class BAJobsucheProvider:
             description=f"Berufe: {berufe}" if berufe else "",
             source="ba",
         )
-
-
-# --------------------------------------------------------------------------
-# CLI
-# --------------------------------------------------------------------------
-
-def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--db", default="robotics_jobs.db")
-    sub = p.add_subparsers(dest="cmd", required=True)
-    s = sub.add_parser("search")
-    s.add_argument("query")
-    s.add_argument("--where", default="")
-    s.add_argument("--radius", type=int, default=50, help="km around --where")
-    s.add_argument("--offer", choices=list(OFFER_TYPES), default="")
-    s.add_argument("--part-time", action="store_true")
-    s.add_argument("--days", type=int, default=0, help="published within N days (1-100)")
-    s.add_argument("--pages", type=int, default=2)
-    s.add_argument("--details", type=int, default=40,
-                   help="fetch full descriptions for the first N hits")
-    args = p.parse_args()
-
-    from fit_score import load_default_scorer
-    store = Store(args.db, scorer=(sc.score if (sc := load_default_scorer()) else None))
-    jobs = BAJobsucheProvider().search(
-        args.query, args.where, args.radius, args.offer,
-        "teilzeit" if args.part_time else "", args.days, args.pages, details=args.details)
-    new = 0
-    for j in jobs:
-        if store.upsert(j):
-            new += 1
-            print(f"  + [{j.fit_score:>3}] {j.title} — {j.company} ({j.location})")
-    print(f"\n{len(jobs)} results · {new} new")
-
-
-if __name__ == "__main__":
-    main()

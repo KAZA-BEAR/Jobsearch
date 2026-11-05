@@ -130,12 +130,7 @@ def _jobspy_fallback_for(store: Store, boards, w: "Worker", strict: bool) -> Non
                 w.found(job)
     w.log(f"fallback: {fb_seen} scanned · {fb_new} new")
 
-# Kept under the old name; the implementation moved to linkedin_jobs so the
-# headless daily sweep shares the same location.
-_data_dir = data_dir
-
-
-DB = str(_data_dir() / "robotics_jobs.db")
+DB = str(data_dir() / "robotics_jobs.db")
 
 # Keys the providers read from the environment. The API keys dialog saves them
 # in settings.json and copies them into os.environ, so the providers need no
@@ -149,14 +144,10 @@ API_KEYS = (
 )
 
 
-_settings_path = settings_path
-_load_settings = load_settings
-
-
 def save_api_keys(keys: dict[str, str]) -> None:
-    settings = _load_settings()
+    settings = load_settings()
     settings["api_keys"] = {k: v for k, v in keys.items() if v}
-    _settings_path().write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    settings_path().write_text(json.dumps(settings, indent=2), encoding="utf-8")
     for name, value in keys.items():
         if value:
             os.environ[name] = value
@@ -1088,7 +1079,7 @@ class App(tk.Tk):
     # ---------------- tab: research & discovery ----------------
 
     def _panel_research(self, f) -> None:
-        saved = _load_settings().get("discovery", {})
+        saved = load_settings().get("discovery", {})
 
         ttk.Label(f, text="Keywords").grid(row=0, column=0, sticky="w", pady=3)
         self.res_query = ttk.Combobox(f, width=28, values=[
@@ -1170,12 +1161,12 @@ class App(tk.Tk):
         region = self.disc_region.get()
         entry_only = self.disc_entry.get()
         budget, site_budget = self.disc_budget.get(), self.disc_site_budget.get()
-        settings = _load_settings()
+        settings = load_settings()
         settings["discovery"] = {"keywords": kw, "region": region, "entry_only": entry_only,
                                  "institutes": sources, "sources": discover, "budget": budget,
                                  "site_budget": site_budget, "urls": " ".join(urls)}
         try:
-            _settings_path().write_text(json.dumps(settings, indent=2), encoding="utf-8")
+            settings_path().write_text(json.dumps(settings, indent=2), encoding="utf-8")
         except OSError:
             pass
 
@@ -1983,7 +1974,7 @@ class App(tk.Tk):
             row=1, column=1, padx=8, **pad)
         ttk.Label(other, text="SEC contact email").grid(row=2, column=0, **pad)
         self.radar_email = ttk.Entry(other, width=28)
-        self.radar_email.insert(0, _load_settings().get("sec_email", ""))
+        self.radar_email.insert(0, load_settings().get("sec_email", ""))
         self.radar_email.grid(row=2, column=1, padx=8, **pad)
         ttk.Label(other, text="asked for by the SEC funding search (New companies)",
                   style="Muted.TLabel").grid(row=3, column=1, padx=8, sticky="w")
@@ -2114,7 +2105,7 @@ class App(tk.Tk):
                 link.grid(row=i, column=2, sticky="w")
                 link.bind("<Button-1>", lambda _e, u=url: webbrowser.open(u))
         ttk.Label(f, foreground=self.MUTED, wraplength=460, justify="left",
-                  text=f"Saved unencrypted in {_settings_path()}. Keys typed here override "
+                  text=f"Saved unencrypted in {settings_path()}. Keys typed here override "
                        "environment variables of the same name. Leave a field empty to "
                        "remove the key.").grid(
             row=len(API_KEYS), column=0, columnspan=3, sticky="w", pady=(8, 0))
@@ -2125,7 +2116,7 @@ class App(tk.Tk):
             except OSError as exc:
                 messagebox.showerror("Could not save", str(exc), parent=dlg)
                 return
-            self.log(f"API keys saved → {_settings_path()}")
+            self.log(f"API keys saved → {settings_path()}")
             dlg.destroy()
 
         btns = ttk.Frame(f)
@@ -2139,7 +2130,7 @@ class App(tk.Tk):
         self._header(f, "New companies", "employers that are new to you, and their job boards")
         # In the data folder like the jobs DB: a bare "company_radar.db" landed
         # wherever the .exe was started from (e.g. next to it in dist\).
-        self.radar = RadarStore(str(_data_dir() / "company_radar.db"))
+        self.radar = RadarStore(str(data_dir() / "company_radar.db"))
 
         # Three ways to find companies, one small card each.
         cards = ttk.Frame(f)
@@ -2293,11 +2284,11 @@ class App(tk.Tk):
         fields = [field] if field else list(FUNDING_KEYWORDS[:6])
         months = self.radar_months.get()
         email = self.radar_email.get().strip()
-        if email != _load_settings().get("sec_email", ""):
-            settings = _load_settings()
+        if email != load_settings().get("sec_email", ""):
+            settings = load_settings()
             settings["sec_email"] = email
             try:
-                _settings_path().write_text(json.dumps(settings, indent=2), encoding="utf-8")
+                settings_path().write_text(json.dumps(settings, indent=2), encoding="utf-8")
             except OSError:
                 pass
 
@@ -2616,8 +2607,8 @@ class App(tk.Tk):
             self.ats_jd.insert("1.0", text)
 
     def _ats_fit_score(self) -> None:
-        """Score the pasted job description against the profile, like
-        `fit_score.py explain`, without adding anything to the job list."""
+        """Score the pasted job description against the profile (FitScorer.explain),
+        without adding anything to the job list."""
         jd = self.ats_jd.get("1.0", "end").strip()
         if not jd:
             messagebox.showwarning("Missing input", "Paste a job description first.")
@@ -3441,7 +3432,7 @@ def ats_headless(argv: list) -> int:
     p.add_argument("--model", default=DEFAULT_LOCAL_MODELS)
     p.add_argument("--writer", default=DEFAULT_WRITER)
     args, _ = p.parse_known_args(argv)
-    log_file = _data_dir() / "ats_headless.log"
+    log_file = data_dir() / "ats_headless.log"
     with open(log_file, "w", encoding="utf-8") as fh:
         def log(m: str) -> None:
             fh.write(m + "\n")
@@ -3472,7 +3463,7 @@ def _install_crash_log():
     import atexit
     import faulthandler
     import time
-    path = _data_dir() / "crash.log"
+    path = data_dir() / "crash.log"
     try:
         big = path.exists() and path.stat().st_size > 1_000_000
         fh = open(path, "w" if big else "a", encoding="utf-8", buffering=1)

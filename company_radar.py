@@ -18,17 +18,10 @@ complementary signals:
   3. CONFIRMATION     Given a company name, probe the five ATS providers for a
                       public job board. A hit means they're actively hiring and
                       can be added to the monitored board list permanently.
-
-Usage:
-    python company_radar.py funding --field robotics --months 6
-    python company_radar.py emerging --db robotics_jobs.db --days 30
-    python company_radar.py probe "Figure AI" "Cartken" "Nimble Robotics"
-    python company_radar.py watchlist
 """
 
 from __future__ import annotations
 
-import argparse
 import re
 import sqlite3
 import sys
@@ -517,103 +510,3 @@ class BoardProber:
         except (KeyError, TypeError):
             return None
         return None
-
-
-# --------------------------------------------------------------------------
-# Commands
-# --------------------------------------------------------------------------
-
-def cmd_funding(args) -> None:
-    scanner = FormDScanner(args.email)
-    radar = RadarStore(args.radar_db)
-    fields = [args.field] if args.field else list(FUNDING_KEYWORDS[:6])
-    new = 0
-    for f in fields:
-        for c in scanner.scan(f, args.months):
-            if radar.upsert(c):
-                new += 1
-                print(f"  + {c.name}  — {c.detail}")
-    print(f"\n{new} new US companies with recent funding filings")
-    print("Run 'probe' on the interesting ones to check if they're hiring.")
-
-
-def cmd_emerging(args) -> None:
-    radar = RadarStore(args.radar_db)
-    new = 0
-    for c in emerging_employers(args.db, args.days, args.min_roles):
-        if radar.upsert(c):
-            new += 1
-            print(f"  + [{c.market}] {c.name} — {c.detail}")
-    print(f"\n{new} newly-seen employers")
-
-
-def cmd_probe(args) -> None:
-    prober = BoardProber()
-    radar = RadarStore(args.radar_db)
-    names = args.names
-    if not names:
-        rows = radar.all()
-        names = [r["name"] for r in rows if not r["ats"]][: args.limit]
-        print(f"probing {len(names)} companies with no known board")
-    hits = 0
-    for name in names:
-        c = prober.probe(name)
-        if c.ats:
-            hits += 1
-        radar.upsert(c)
-    print(f"\n{hits}/{len(names)} have a public job board")
-
-
-def cmd_watchlist(args) -> None:
-    rows = RadarStore(args.radar_db).all(args.signal)
-    if not rows:
-        print("radar is empty — run 'funding' or 'emerging' first")
-        return
-    with_board = [r for r in rows if r["ats"]]
-    print(f"{len(rows)} companies tracked · {len(with_board)} with a live job board\n")
-    for r in rows[: args.limit]:
-        flag = f"[{r['ats']}:{r['ats_slug']}]" if r["ats"] else ""
-        print(f"  {r['market']:<3} {r['name'][:38]:<38} {r['signal']:<9} {flag}")
-        if r["detail"]:
-            print(f"      {r['detail']}")
-    if with_board:
-        print("\nAdd these to BOARDS in robotics_track.py to monitor them permanently:")
-        for r in with_board[:10]:
-            print(f'    Board("{r["name"]}", "{r["ats"]}", "{r["ats_slug"]}", '
-                  f'"{r["market"]}", "robotics"),')
-
-
-def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--radar-db", default=RADAR_DB)
-    sub = p.add_subparsers(dest="cmd", required=True)
-
-    f = sub.add_parser("funding", help="US startups from SEC Form D filings")
-    f.add_argument("--field", default="robotics")
-    f.add_argument("--months", type=int, default=6)
-    f.add_argument("--email", default="", help="contact address for the SEC User-Agent")
-    f.set_defaults(func=cmd_funding)
-
-    e = sub.add_parser("emerging", help="new employers in your own job database")
-    e.add_argument("--db", default="robotics_jobs.db")
-    e.add_argument("--days", type=int, default=30)
-    e.add_argument("--min-roles", type=int, default=1)
-    e.set_defaults(func=cmd_emerging)
-
-    pr = sub.add_parser("probe", help="check companies for a public ATS board")
-    pr.add_argument("names", nargs="*")
-    pr.add_argument("--limit", type=int, default=25)
-    pr.set_defaults(func=cmd_probe)
-
-    w = sub.add_parser("watchlist", help="show tracked companies")
-    w.add_argument("--signal", default="", choices=["", "funding", "emerging", "probe"])
-    w.add_argument("--limit", type=int, default=60)
-    w.set_defaults(func=cmd_watchlist)
-
-    args = p.parse_args()
-    args.func(args)
-
-
-if __name__ == "__main__":
-    main()

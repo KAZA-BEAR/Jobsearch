@@ -12,15 +12,10 @@ is the institute's own feed:
   mpg         Max Planck Society. RSS of all openings; keyword-filtered here.
   thd         Technische Hochschule Deggendorf (your university). Parsed
               from the public job listing page.
-
-Usage:
-    python research_jobs.py search robotik --sources fraunhofer,dlr
-    python research_jobs.py search "" --sources thd          # everything at THD
 """
 
 from __future__ import annotations
 
-import argparse
 import html
 import json
 import re
@@ -30,7 +25,7 @@ from hashlib import sha1
 
 import requests
 
-from linkedin_jobs import Job, RateLimiter, Store, parse_posted
+from linkedin_jobs import Job, RateLimiter, parse_posted
 
 SUCCESSFACTORS = {
     "fraunhofer": ("Fraunhofer", "https://jobs.fraunhofer.de/services/rss/job/"),
@@ -226,38 +221,3 @@ class ResearchFeeds:
                 source="thd",
             ))
         return out
-
-
-# --------------------------------------------------------------------------
-# CLI
-# --------------------------------------------------------------------------
-
-def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--db", default="robotics_jobs.db")
-    sub = p.add_subparsers(dest="cmd", required=True)
-    s = sub.add_parser("search")
-    s.add_argument("keywords", nargs="?", default="robotik")
-    s.add_argument("--sources", default=",".join(SOURCES))
-    args = p.parse_args()
-
-    from fit_score import load_default_scorer
-    store = Store(args.db, scorer=(sc.score if (sc := load_default_scorer()) else None))
-    feeds = ResearchFeeds()
-    for src in [x.strip() for x in args.sources.split(",") if x.strip()]:
-        try:
-            jobs = feeds.search(src, args.keywords)
-        except Exception as exc:
-            print(f"{src}: FAILED {exc}")
-            continue
-        new = 0
-        for j in jobs:
-            if store.upsert(j):
-                new += 1
-                print(f"  + [{j.fit_score}] [{j.employment_type}] {j.title} ({j.location})")
-        print(f"{SOURCES[src]}: {len(jobs)} roles, {new} new")
-
-
-if __name__ == "__main__":
-    main()

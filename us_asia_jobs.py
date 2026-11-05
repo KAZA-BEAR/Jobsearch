@@ -25,7 +25,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import html
 import os
 import re
 import sys
@@ -42,6 +41,7 @@ from robotics_track import (
     GRAD_MARKERS,
     MECHATRONICS_MARKERS,
     SENIOR_MARKERS,
+    _html_lines,
 )
 
 # --------------------------------------------------------------------------
@@ -353,13 +353,6 @@ class AdzunaProvider:
 # MyCareersFuture — Singapore, keyless
 # --------------------------------------------------------------------------
 
-def _html_text(raw: str) -> str:
-    """HTML to plain text, one line per paragraph or list item."""
-    text = re.sub(r"(?i)<\s*(br|/p|/li|/h\d|/div)\b[^>]*>", "\n", raw or "")
-    text = html.unescape(re.sub(r"<[^>]+>", " ", text))
-    return "\n".join(" ".join(l.split()) for l in text.splitlines() if l.strip())
-
-
 class MyCareersFutureProvider:
     """Singapore's national job portal.
 
@@ -457,7 +450,7 @@ class MyCareersFutureProvider:
         self.limiter.wait()
         try:
             resp = request_with_retry(self.session, "GET", self.DETAIL_URL.format(uuid_), tries=2)
-            return _html_text(resp.json().get("description") or "")[:4000]
+            return _html_lines(resp.json().get("description") or "")[:4000]
         except Exception as exc:  # noqa: BLE001 - the job is kept without it
             if on_log:
                 on_log(f"[mcf] description for {uuid_} failed: {exc}")

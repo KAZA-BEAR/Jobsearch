@@ -354,7 +354,7 @@ def call_model(prompt: str, model: str = DEFAULT_MODEL, max_tokens: int = 1500,
     if backend in ("ollama", "local"):
         return _call_ollama(prompt, model, max_tokens, timeout, base_url,
                             schema, temperature, logprobs)
-    if backend in ("openai", "lmstudio"):
+    if backend == "openai":
         return _call_openai_compatible(prompt, model, max_tokens, api_key,
                                        timeout, base_url, schema, temperature, logprobs)
     raise PipelineError(f"Unknown backend '{backend}'. Use ollama or openai.")
@@ -2707,7 +2707,7 @@ def write_texts(profile, job_description, lang, gaps, recruiter, call, log, forb
                                                    facts=numbered),
              checks.recruiter_problems, prompts.RECRUITER_SCHEMA),
             ("cover_letter",
-             lambda: prompts.cover_only_prompt(profile, brief, lang, gaps, numbered, cited=True),
+             lambda: prompts.cover_only_prompt(profile, brief, lang, gaps, numbered),
              checks.letter_problems, None)):
         best, best_problems, drafts, built = None, [], [], False
         cite_removed = []
@@ -3183,7 +3183,7 @@ def prepare(job_description: str, region_code: str, profile_path: Path = None,
     if chosen:
         drafters = chosen
     if model or drafters:
-        # named models are loaded with the right context; no lms commands to type
+        # named models are loaded with the right context
         ensure_models_loaded(list(dict.fromkeys([model] + drafters)), base_url, log)
     if not model:
         model = _first_chat_model(base_url)

@@ -7,16 +7,10 @@ Extends linkedin_jobs.py with:
   * a free EURES provider (European Commission, no API key needed)
   * a classifier that tags roles as internship / working-student / graduate / thesis
   * filters that drop senior roles that leak into student queries
-
-Usage:
-    python eu_student_jobs.py sweep --countries DE,NL,FR --field "data science"
-    python eu_student_jobs.py sweep --countries DE --kind werkstudent --provider eures
-    python eu_student_jobs.py report
 """
 
 from __future__ import annotations
 
-import argparse
 import re
 import sys
 import uuid
@@ -31,7 +25,6 @@ from linkedin_jobs import (
     Provider,
     PROVIDERS,
     RateLimiter,
-    Store,
     request_with_retry,
 )
 
@@ -541,120 +534,3 @@ def is_student_suitable(job: Job) -> tuple[bool, str]:
     if m:
         return False, f"requires {m.group(0)}"
     return True, ""
-
-
-# --------------------------------------------------------------------------
-# Commands
-# --------------------------------------------------------------------------
-
-def cmd_sweep(args) -> None:
-    codes = [c.strip().upper() for c in args.countries.split(",") if c.strip()]
-    unknown = [c for c in codes if c not in MARKETS]
-    if unknown:
-        raise SystemExit(f"unknown country codes: {', '.join(unknown)}. "
-                         f"Available: {', '.join(sorted(MARKETS))}")
-
-    provider = EuresProvider()
-    store = Store(args.db)
-    kinds = [args.kind] if args.kind else list(KINDS)
-    total_new = total_seen = skipped = 0
-
-    for code in codes:
-        market = MARKETS[code]
-        print(f"\n=== {market.name} ===")
-        if market.note:
-            print(f"    {market.note}")
-        terms: list[str] = []
-        for kind in kinds:
-            attr = {"internship": "internship", "werkstudent": "working_student",
-                    "graduate": "graduate", "thesis": "thesis"}[kind]
-            terms.extend(getattr(market, attr))
-
-        for term in terms[: args.max_terms]:
-            query = f"{term} {args.field}".strip()
-            # EURES filters by country; it ignores a city, so one search per term
-            locations = (market.name,)
-            for loc in locations:
-                try:
-                    results = provider.search(query, loc, args.pages, False, country=code)
-                    for job in results:
-                        total_seen += 1
-                        ok, reason = is_student_suitable(job)
-                        if not ok:
-                            skipped += 1
-                            continue
-                        label = classify(job, market)
-                        if args.strict and label is None:
-                            skipped += 1
-                            continue
-                        job.employment_type = label or job.employment_type
-                        if store.upsert(job):
-                            total_new += 1
-                            tag = f"[{label}]" if label else ""
-                            print(f"  + {tag} {job.title} — {job.company} ({job.location})")
-                except KeyboardInterrupt:
-                    print("\ninterrupted", file=sys.stderr)
-                    return
-                except Exception as exc:
-                    print(f"  ! {query} @ {loc}: {exc}", file=sys.stderr)
-
-    print(f"\n{total_seen} seen · {total_new} new · {skipped} filtered out")
-
-
-def cmd_report(args) -> None:
-    rows = Store(args.db).all()
-    if not rows:
-        print("no jobs stored yet — run a sweep first")
-        return
-    by_kind: dict[str, int] = {}
-    by_country: dict[str, int] = {}
-    for r in rows:
-        by_kind[r["employment_type"] or "other"] = by_kind.get(r["employment_type"] or "other", 0) + 1
-        loc = (r["location"] or "").lower()
-        for code, m in MARKETS.items():
-            if m.name.lower() in loc or any(c.lower() in loc for c in m.cities):
-                by_country[code] = by_country.get(code, 0) + 1
-                break
-    print(f"{len(rows)} stored roles\n")
-    print("by type:")
-    for k, v in sorted(by_kind.items(), key=lambda x: -x[1]):
-        print(f"  {v:>4}  {k}")
-    print("\nby market:")
-    for k, v in sorted(by_country.items(), key=lambda x: -x[1]):
-        print(f"  {v:>4}  {MARKETS[k].name}")
-
-
-def cmd_markets(args) -> None:
-    for code, m in sorted(MARKETS.items()):
-        print(f"{code}  {m.name:<14} {', '.join(m.cities[:4])}")
-        if m.note:
-            print(f"    → {m.note}")
-
-
-def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--db", default="eu_student_jobs.db")
-    sub = p.add_subparsers(dest="cmd", required=True)
-
-    s = sub.add_parser("sweep", help="search multiple countries and role types")
-    s.add_argument("--countries", default="DE,NL,FR,SE,PL")
-    s.add_argument("--field", default="", help="e.g. 'data science', 'mechanical engineering'")
-    s.add_argument("--kind", choices=KINDS, help="restrict to one role type")
-    s.add_argument("--pages", type=int, default=1)
-    s.add_argument("--max-terms", type=int, default=6)
-    s.add_argument("--strict", action="store_true", help="drop anything not clearly student-level")
-    s.set_defaults(func=cmd_sweep)
-
-    r = sub.add_parser("report", help="breakdown by role type and market")
-    r.set_defaults(func=cmd_report)
-
-    m = sub.add_parser("markets", help="list configured countries")
-    m.set_defaults(func=cmd_markets)
-
-    args = p.parse_args()
-    args.func(args)
-
-
-if __name__ == "__main__":
-    main()

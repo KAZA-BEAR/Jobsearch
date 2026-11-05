@@ -17,15 +17,10 @@ The score adds up five signals:
   language  (-20..5) penalises postings that demand fluent German when the
                     profile says German is below B2
   location  (0-10)  near the profile's home city (Bavaria, Straubing area)
-
-Usage:
-    python fit_score.py rescore --db robotics_jobs.db
-    python fit_score.py explain "Werkstudent Robotik ROS2 (m/w/d)" --desc "..."
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import re
 import sys
@@ -376,34 +371,3 @@ def rescore(store: Store, scorer: FitScorer, only_missing: bool = False) -> int:
             n += 1
         store.conn.commit()
     return n
-
-
-# --------------------------------------------------------------------------
-# CLI
-# --------------------------------------------------------------------------
-
-def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--profile", default=str(default_profile_path()))
-    sub = p.add_subparsers(dest="cmd", required=True)
-    r = sub.add_parser("rescore", help="recompute fit for every stored job")
-    r.add_argument("--db", default="robotics_jobs.db")
-    e = sub.add_parser("explain", help="score one title/description")
-    e.add_argument("title")
-    e.add_argument("--desc", default="")
-    e.add_argument("--location", default="")
-    args = p.parse_args()
-
-    scorer = FitScorer.from_file(args.profile)
-    if args.cmd == "rescore":
-        n = rescore(Store(args.db), scorer)
-        print(f"rescored {n} jobs")
-    else:
-        job = Job(job_id="x", title=args.title, company="", location=args.location,
-                  description=args.desc)
-        print(scorer.explain(job).summary())
-
-
-if __name__ == "__main__":
-    main()

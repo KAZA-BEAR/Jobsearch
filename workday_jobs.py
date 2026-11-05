@@ -15,16 +15,10 @@ The {site} part is case-sensitive and differs per company, so it can't be
 guessed reliably (a wrong one returns HTTP 422). Paste the careers URL instead:
 parse_url() reads tenant/wd/site from any myworkdayjobs.com link, e.g.
     https://zeissgroup.wd3.myworkdayjobs.com/en-US/External/job/...
-
-Usage:
-    python workday_jobs.py search "robotics" --country Germany
-    python workday_jobs.py search "Werkstudent" --site https://zeissgroup.wd3.myworkdayjobs.com/External
-    python workday_jobs.py sites
 """
 
 from __future__ import annotations
 
-import argparse
 import html
 import re
 import sys
@@ -32,7 +26,7 @@ from dataclasses import dataclass
 
 import requests
 
-from linkedin_jobs import Job, RateLimiter, Store, parse_posted
+from linkedin_jobs import Job, RateLimiter, parse_posted
 
 
 @dataclass(frozen=True)
@@ -194,42 +188,3 @@ class WorkdayBoards:
             description=" · ".join(str(b) for b in bullets),
             source="workday",
         )
-
-
-# --------------------------------------------------------------------------
-# CLI
-# --------------------------------------------------------------------------
-
-def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--db", default="robotics_jobs.db")
-    sub = p.add_subparsers(dest="cmd", required=True)
-    s = sub.add_parser("search")
-    s.add_argument("text", nargs="?", default="")
-    s.add_argument("--country", default="Germany")
-    s.add_argument("--site", action="append", help="myworkdayjobs.com URL (repeatable)")
-    s.add_argument("--max", type=int, default=100)
-    sub.add_parser("sites")
-    args = p.parse_args()
-
-    if args.cmd == "sites":
-        for s in SITES:
-            print(f"  {s.company:<22} {s.host}/{s.site}")
-        return
-    sites = [parse_url(u) for u in args.site] if args.site else list(SITES)
-    from fit_score import load_default_scorer
-    store = Store(args.db, scorer=(sc.score if (sc := load_default_scorer()) else None))
-    wb = WorkdayBoards()
-    for site in sites:
-        try:
-            jobs = wb.search(site, args.text, args.country, args.max)
-        except Exception as exc:
-            print(f"{site.company}: FAILED {exc}")
-            continue
-        new = sum(store.upsert(j) for j in jobs)
-        print(f"{site.company}: {len(jobs)} roles, {new} new")
-
-
-if __name__ == "__main__":
-    main()

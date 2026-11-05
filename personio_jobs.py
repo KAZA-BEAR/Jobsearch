@@ -11,16 +11,10 @@ Personio customer that enabled it publishes a keyless XML feed at
 A 307 redirect to personio.com means the slug is wrong or the company does not
 use Personio. Find a company's slug from its careers page link
 ("xyz.jobs.personio.de") and add it to COMPANIES or pass it on the command line.
-
-Usage:
-    python personio_jobs.py fetch                       # all preset companies
-    python personio_jobs.py fetch magazino sewts        # specific slugs
-    python personio_jobs.py probe "Roboception" "Kinexon"
 """
 
 from __future__ import annotations
 
-import argparse
 import html
 import re
 import sys
@@ -29,7 +23,7 @@ from dataclasses import dataclass
 
 import requests
 
-from linkedin_jobs import Job, RateLimiter, Store
+from linkedin_jobs import Job, RateLimiter
 
 
 @dataclass(frozen=True)
@@ -143,46 +137,3 @@ def slug_candidates(name: str) -> list[str]:
     words = base.split()
     out = ["-".join(words), "".join(words), words[0] if words else ""]
     return [s for i, s in enumerate(out) if s and s not in out[:i]]
-
-
-# --------------------------------------------------------------------------
-# CLI
-# --------------------------------------------------------------------------
-
-def main() -> None:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--db", default="robotics_jobs.db")
-    sub = p.add_subparsers(dest="cmd", required=True)
-    f = sub.add_parser("fetch")
-    f.add_argument("slugs", nargs="*")
-    pr = sub.add_parser("probe", help="guess slugs for company names")
-    pr.add_argument("names", nargs="+")
-    args = p.parse_args()
-
-    feeds = PersonioFeeds()
-    if args.cmd == "probe":
-        for name in args.names:
-            hit = None
-            for slug in slug_candidates(name):
-                jobs = feeds.fetch(PersonioCompany(name, slug))
-                if jobs is not None:
-                    hit = (slug, len(jobs))
-                    break
-            print(f"  {name}: " + (f"{hit[0]} ({hit[1]} roles)" if hit else "no Personio feed"))
-        return
-
-    companies = ([PersonioCompany(s, s) for s in args.slugs] if args.slugs else COMPANIES)
-    from fit_score import load_default_scorer
-    store = Store(args.db, scorer=(sc.score if (sc := load_default_scorer()) else None))
-    for c in companies:
-        jobs = feeds.fetch(c)
-        if jobs is None:
-            print(f"{c.company}: no Personio feed at '{c.slug}'")
-            continue
-        new = sum(store.upsert(j) for j in jobs)
-        print(f"{c.company}: {len(jobs)} roles, {new} new")
-
-
-if __name__ == "__main__":
-    main()
