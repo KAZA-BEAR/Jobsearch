@@ -413,7 +413,13 @@ No soft skills, benefits or company descriptions, and no degree or field of stud
 NO items.
 
 JOB AD:
-{ad}"""
+{ad}
+
+Reminder: every "skill" is an ENGLISH name ("mapping algorithms", not
+"Kartierungsalgorithmen"); only "quote" stays in the ad's language."""
+# (Qwen3.5-4B gave German names for German ads when the rule stood only above the
+# ad - "Kartierungsalgorithmen", "Robotik" - and the letter then said "I am keen to
+# learn Kartierungsalgorithmen", 2026-11-05.)
 
 REQUIREMENTS_SCHEMA = {
     "type": "object", "required": ["requirements"],
@@ -427,6 +433,25 @@ REQUIREMENTS_SCHEMA = {
 
 def requirements_prompt(ad: str) -> str:
     return REQUIREMENTS.format(ad=ad)
+
+
+# Safety net for skill names that still come back German.
+TRANSLATE_SKILLS = """Translate each numbered skill or language name from a German job ad into
+its short standard ENGLISH name (1-4 words), keeping the order. Names that are
+already English or are product names stay as they are.
+Examples: "Kartierungsalgorithmen" -> "mapping algorithms", "Robotik" -> "robotics",
+"Deutsch" -> "German", "Bildverarbeitung" -> "image processing".
+
+{names}"""
+
+TRANSLATE_SKILLS_SCHEMA = {
+    "type": "object", "required": ["names"],
+    "properties": {"names": {"type": "array", "items": {"type": "string"}}},
+}
+
+
+def translate_skills_prompt(names: list) -> str:
+    return TRANSLATE_SKILLS.format(names="\n".join(f"{i}. {n}" for i, n in enumerate(names, 1)))
 
 
 # A pasted ad has no "Position: / Company:" header, so the letter had no addressee.

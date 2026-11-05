@@ -365,16 +365,24 @@ _GERMAN_REQ = (
 _GERMAN_CEFR = re.compile(r"\b(?:deutsch\w*|german)\b[^.\n]{0,25}?\b([abc][12])\b", re.I)
 
 
+def _or_english(body: str, m) -> bool:
+    """German OR English, in either order: "Sehr gute Deutsch- oder Englischkenntnisse"
+    was a C1 German requirement, though English alone meets it (Rheinmetall, 2026-11-05)."""
+    return bool(re.search(r"\b(?:englisch|english)\w*-?\s+(?:oder|or)\b", m.group(0), re.I)
+                or re.match(r"\w*-?\s+(?:oder|or)\s+(?:englisch|english)", body[m.end():m.end() + 40], re.I))
+
+
 def german_requirement(job_description: str) -> tuple[int, str]:
     """(CEFR level the ad asks for, the phrase that says so), or (0, "")."""
     body = jd_excerpt(job_description, limit=20_000)
     best = (0, "")
     m = _GERMAN_CEFR.search(body)
-    if m and not _OPTIONAL.search(body[m.end():m.end() + 60]):
+    if m and not _OPTIONAL.search(body[m.end():m.end() + 60]) and not _or_english(body, m):
         best = (_CEFR[m.group(1).lower()], m.group(0))
     for pattern, level in _GERMAN_REQ:
         for m in pattern.finditer(body):
-            if level > best[0] and not _OPTIONAL.search(body[m.end():m.end() + 60]):
+            if (level > best[0] and not _OPTIONAL.search(body[m.end():m.end() + 60])
+                    and not _or_english(body, m)):
                 best = (level, m.group(0))
     return best
 

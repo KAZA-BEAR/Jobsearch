@@ -100,10 +100,43 @@ def extract_requirements(job_description: str, call, log) -> list:
                          "priority": "preferred" if it.get("priority") == "preferred" else "required"})
             seen.add(skill.lower())
     _same_priority_per_group(kept, job_description)
+    _english_names(kept, call, log)
     log(f"Job requirements: {len(kept)} found"
         + (f", {len(dropped)} discarded because their quote is not in the ad" if dropped else "")
         + (f", {len(degree)} fields of study left out" if degree else ""))
     return kept
+
+
+# A German skill name: umlauts, a language name, or a typical German ending
+# ("Kartierungsalgorithmen", "Robotik", "Bildverarbeitung", "Regelungstechnik").
+_GERMAN_SKILL = re.compile(r"[äöüß]|\b(deutsch|englisch|französisch)\b|"
+                           r"\w(ung|ungen|keit|heit|technik|algorithmen|kenntnisse|systeme|"
+                           r"verfahren|entwicklung)\b|\w{3}ik\b", re.I)
+
+
+def _english_names(reqs: list, call, log) -> None:
+    """Skill names in English: the profile is matched in English, and a German name
+    reached the letter ("I am keen to learn Kartierungsalgorithmen", Qwen3.5-4B,
+    2026-11-05). The quote stays as the ad wrote it."""
+    german = [r for r in reqs if _GERMAN_SKILL.search(r["skill"])]
+    if not german:
+        return
+    try:
+        raw = call(prompts.translate_skills_prompt([r["skill"] for r in german]),
+                   max_tokens=60 * len(german) + 60, schema=prompts.TRANSLATE_SKILLS_SCHEMA,
+                   temperature=0)
+        names = [str(n).strip() for n in json.loads(raw).get("names", [])]
+    except (ValueError, AttributeError):
+        return
+    if len(names) != len(german):
+        return                       # a shifted list would rename the wrong skills
+    done = [f"{r['skill']} -> {n}" for r, n in zip(german, names)
+            if n and n.lower() != r["skill"].lower() and not _GERMAN_SKILL.search(n)]
+    for r, n in zip(german, names):
+        if n and not _GERMAN_SKILL.search(n):
+            r["skill"] = n
+    if done:
+        log("Skill names put in English: " + ", ".join(done))
 
 
 # Where a model may have left words out of a quote: "..." or, without saying so,
