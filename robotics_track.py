@@ -138,8 +138,8 @@ class Board:
 
 
 # Checked live 2026-09-23. Employers whose old board had gone dead were moved:
-# Magazino, Franka Robotics, NEURA Robotics, Wandelbots -> personio_jobs.py;
-# ZEISS, ASML -> workday_jobs.py. ats="none" means no public API was found:
+# Magazino, Franka Robotics, NEURA Robotics, Wandelbots -> employer_feeds.py;
+# ZEISS, ASML -> employer_feeds.py. ats="none" means no public API was found:
 # the board is not polled, but the LinkedIn/Indeed fallback still searches the
 # company by name, and most German ones post on the Arbeitsagentur anyway.
 BOARDS: tuple[Board, ...] = (

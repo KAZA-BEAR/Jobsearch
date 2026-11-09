@@ -184,7 +184,7 @@ def run_sweep(force: bool = False, log=print, cancelled: threading.Event | None 
     src = cfg["sources"]
     try:
         if src.get("ba") and not stop.is_set():
-            from ba_jobsuche import BAJobsucheProvider
+            from employer_feeds import BAJobsucheProvider
             ba = BAJobsucheProvider()
             for s in cfg["ba"]["searches"]:
                 if stop.is_set():
@@ -197,7 +197,7 @@ def run_sweep(force: bool = False, log=print, cancelled: threading.Event | None 
                     fail("ba", s["query"], exc)
 
         if src.get("personio") and not stop.is_set():
-            from personio_jobs import COMPANIES, PersonioFeeds
+            from employer_feeds import COMPANIES, PersonioFeeds
             feeds = PersonioFeeds()
             for c in COMPANIES + tuple(_custom_personio(cfg)):
                 if stop.is_set():
@@ -209,7 +209,7 @@ def run_sweep(force: bool = False, log=print, cancelled: threading.Event | None 
             log(f"[sweep] personio: {counts.get('personio', {}).get('seen', 0)} roles")
 
         if src.get("workday") and not stop.is_set():
-            from workday_jobs import SITES, WorkdayBoards, parse_url
+            from employer_feeds import SITES, WorkdayBoards, parse_url
             wb = WorkdayBoards()
             sites = list(SITES) + [parse_url(u) for u in cfg["workday"].get("extra_sites", [])]
             for site in sites:
@@ -224,7 +224,7 @@ def run_sweep(force: bool = False, log=print, cancelled: threading.Event | None 
                         fail("workday", f"{site.company} '{q}'", exc)
 
         if src.get("research") and not stop.is_set():
-            from research_jobs import ResearchFeeds
+            from employer_feeds import ResearchFeeds
             rf = ResearchFeeds()
             for source in cfg["research"]["sources"]:
                 # MPG and THD feeds aren't keyword-searchable server-side; fetch once.
@@ -403,7 +403,7 @@ def _sweep_us_asia(cfg: dict, stop: threading.Event, log, keep, fail) -> None:
 
 
 def _custom_personio(cfg: dict):
-    from personio_jobs import PersonioCompany
+    from employer_feeds import PersonioCompany
     for slug in cfg.get("personio", {}).get("extra_slugs", []) if isinstance(cfg.get("personio"), dict) else []:
         yield PersonioCompany(slug, slug)
 

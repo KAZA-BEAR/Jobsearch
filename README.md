@@ -116,7 +116,7 @@ Optional LinkedIn/Indeed search (`python-jobspy` pins an old numpy that often fa
 build, so it has its own installer):
 
 ```bash
-python install_jobspy.py
+python jobspy_provider.py install
 ```
 
 ---
@@ -310,7 +310,7 @@ for a public job board on Greenhouse, Lever, SmartRecruiters, Ashby, Recruitee a
 Personio. A typed name updates a company already listed ("AMP Robotics" → "AMP Robotics
 Corp"). **More ▾ → Copy board entries** copies ready-to-paste lines for monitoring them
 permanently: `Board(…)` lines for `robotics_track.py` and `PersonioCompany(…)` lines for
-`personio_jobs.py`. Each company's market code comes from its job locations (DE, CH,
+`employer_feeds.py`. Each company's market code comes from its job locations (DE, CH,
 NL, GB…).
 
 To track a job, select it under **Jobs** and use **Track ▾** (or right-click it). In the
@@ -575,24 +575,21 @@ Generated CVs and letters go to `ats_outputs\` in the project folder instead (se
 |---|---|
 | `job_gui.py` | desktop app (Tkinter); `--ats` and `--sweep` headless modes |
 | `ats_pipeline.py` | CV/letter pipeline: model calls, drafting, merging, fact-check, outputs |
-| `ats_plan.py` | profile check, requirement extraction, gap analysis, rewrite plan |
+| `ats_plan.py` | profile check, requirement extraction, gap analysis (incl. meaning-based matching via Ollama embeddings), rewrite plan |
 | `ats_checks.py` | all deterministic checks, keyword and style analysis |
 | `ats_prompts.py` | prompts and JSON schemas for the model |
-| `ats_embed.py` | meaning-based requirement matching via Ollama embeddings |
-| `ats_latex.py` | LaTeX templates for CVs and letters |
-| `ats_regions.py` | per-market conventions (photo, date of birth, nationality) |
-| `fit_score.py` | 0–100 fit score and profile lookup |
+| `ats_latex.py` | LaTeX templates for CVs and letters, and per-market conventions (photo, date of birth, nationality) |
+| `fit_score.py` | 0–100 fit score, profile lookup, and suggested search keywords for your skills (ESCO + local model) |
 | `daily_sweep.py` | once-a-day sweep and Windows task |
-| `related_skills.py` | suggested search keywords for your skills (ESCO + local model) |
 | `system_checks.py` | the health checks (Settings): API, Ollama, hardware and pipeline |
 | `linkedin_jobs.py` | job model, SQLite store, shared HTTP helpers, LinkedIn APIs |
 | `eu_student_jobs.py` | EURES and student-job classification |
 | `robotics_track.py` | PhD positions (EURES doctoral filter) and employer ATS boards |
-| `ba_jobsuche.py`, `personio_jobs.py`, `workday_jobs.py`, `research_jobs.py` | further sources |
+| `employer_feeds.py` | further sources: Arbeitsagentur, Personio, Workday, research institutes |
 | `company_radar.py` | newly hiring companies |
 | `discover_jobs.py` | open-ended discovery: Common Crawl job boards, career-page detector, Wikidata, YC, HN |
 | `us_asia_jobs.py` | US / Asia-Pacific sources |
-| `jobspy_provider.py`, `install_jobspy.py` | optional LinkedIn/Indeed engine |
+| `jobspy_provider.py` | optional LinkedIn/Indeed engine (`python jobspy_provider.py install` installs it) |
 | `build.bat`, `jobsearch.spec` | Windows build |
 
 ---
@@ -655,7 +652,11 @@ placeholder profile such as the example above instead of your real one.
   the judge, the writer and a full CV + letter on a sample job.
 - **Report wording**: "bullet(s) reworded" only counts bullets that actually changed.
 - **Leaner code**: the standalone command-line tools of seven provider modules were
-  removed (the app and the documented commands are unchanged).
+  removed, and small modules were combined (24 scripts → 17): the Arbeitsagentur,
+  Personio, Workday and research feeds are in `employer_feeds.py`, the JobSpy installer
+  is `python jobspy_provider.py install`, the per-market CV rules are in `ats_latex.py`,
+  the embedding matcher in `ats_plan.py` and the suggested keywords in `fit_score.py`.
+  The app and the documented commands are unchanged.
 
 **October 2026**
 - **Renamed** from *EU Job Search* to **Jobsearch Assistant** (it covers Europe, the US and

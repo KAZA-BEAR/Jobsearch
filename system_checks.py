@@ -81,7 +81,7 @@ def _count(jobs, what: str = "jobs") -> tuple[str, str]:
 # --------------------------------------------------------------------------
 
 def _api_ba():
-    from ba_jobsuche import BAJobsucheProvider
+    from employer_feeds import BAJobsucheProvider
     return _count(BAJobsucheProvider().search("Robotik", pages=1, per_page=25, details=0))
 
 
@@ -91,7 +91,7 @@ def _api_eures():
 
 
 def _api_personio():
-    from personio_jobs import COMPANIES, PersonioFeeds
+    from employer_feeds import COMPANIES, PersonioFeeds
     feeds = PersonioFeeds()
     for c in COMPANIES[:3]:
         jobs = feeds.fetch(c)
@@ -102,7 +102,7 @@ def _api_personio():
 
 
 def _api_workday():
-    from workday_jobs import SITES, WorkdayBoards
+    from employer_feeds import SITES, WorkdayBoards
     site = SITES[0]
     jobs = WorkdayBoards().search(site, "", "", max_jobs=5, details=0)
     return PASS, f"answered, {site.company}: {len(jobs)} jobs"
@@ -110,7 +110,7 @@ def _api_workday():
 
 def _api_research(source: str):
     def check():
-        from research_jobs import ResearchFeeds
+        from employer_feeds import ResearchFeeds
         return _count(ResearchFeeds().search(source, ""), "postings")
     return check
 
@@ -202,7 +202,7 @@ def _api_jobspy():
     try:
         import jobspy  # noqa: F401
     except ImportError:
-        return WARN, "python-jobspy not installed (optional; run install_jobspy.py)"
+        return WARN, "python-jobspy not installed (optional; run: python jobspy_provider.py install)"
     except SystemExit as exc:
         return WARN, str(exc)
     from importlib.metadata import PackageNotFoundError, version
@@ -215,7 +215,7 @@ def _api_jobspy():
 
 
 def api_checks(sec_email: str = "") -> list[tuple[str, callable]]:
-    from research_jobs import SOURCES as RESEARCH
+    from employer_feeds import SOURCES as RESEARCH
     from robotics_track import ATS_ENDPOINTS, BOARDS
     from us_asia_jobs import US_ASIA_BOARDS
 
@@ -258,7 +258,7 @@ def api_checks(sec_email: str = "") -> list[tuple[str, callable]]:
 def required_models(judge: str = None, writer: str = None) -> list[str]:
     """Chat models the CV generator loads (the ones set under Settings, else the
     defaults), then the embedding model."""
-    from ats_embed import EMBED_MODEL
+    from ats_plan import EMBED_MODEL
     from ats_pipeline import DEFAULT_LOCAL_MODELS, DEFAULT_WRITER
     names = f"{judge or DEFAULT_LOCAL_MODELS},{writer or DEFAULT_WRITER}"
     chat = [m.strip() for m in names.split(",") if m.strip()]
@@ -373,7 +373,7 @@ def _pl_ready(base_url: str, models: list[str]) -> None:
 
 def _pl_embed(base_url: str):
     def check():
-        from ats_embed import EMBED_MODEL, embed
+        from ats_plan import EMBED_MODEL, embed
         _pl_ready(base_url, [EMBED_MODEL])
         q, near, far = embed(["search_query: ROS2 robot navigation",
                               "search_document: Nav2 path planning for a mobile robot",
@@ -430,7 +430,7 @@ def _pl_writer(base_url: str, writer: str):
 def _pl_full(base_url: str, judge: str, writer: str, profile_path: str):
     def check():
         import ats_pipeline
-        from ats_embed import EMBED_MODEL
+        from ats_plan import EMBED_MODEL
         writers = [m.strip() for m in writer.split(",") if m.strip()]
         _pl_ready(base_url, [judge, *writers, EMBED_MODEL])
         log: list[str] = []

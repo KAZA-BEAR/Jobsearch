@@ -453,8 +453,8 @@ class BoardProber:
         above do not cover: Wandelbots and Franka Robotics were reported "no public
         board" although both have one (2026-10-11). Personio answers 404 for a name
         it does not know, so a valid feed is evidence even with no open roles."""
-        from personio_jobs import HOSTS, PersonioCompany, PersonioFeeds
-        from personio_jobs import slug_candidates as personio_slugs
+        from employer_feeds import HOSTS, PersonioCompany, PersonioFeeds
+        from employer_feeds import slug_candidates as personio_slugs
         feeds = PersonioFeeds(rpm=60)
         for slug in personio_slugs(c.name):
             jobs = feeds.fetch(PersonioCompany(c.name, slug))

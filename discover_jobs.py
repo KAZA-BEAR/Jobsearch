@@ -57,7 +57,7 @@ import requests
 from company_radar import Company
 from eu_student_jobs import APPRENTICESHIP, EU_FIELD_MARKERS, EU_FIELD_STRONG
 from linkedin_jobs import Job, Store, data_dir
-from personio_jobs import PersonioCompany, PersonioFeeds
+from employer_feeds import PersonioCompany, PersonioFeeds
 
 SOURCES = {
     "crawl": "Job boards found by Common Crawl (Personio, Greenhouse, Ashby, Recruitee, Workable)",

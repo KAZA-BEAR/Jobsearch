@@ -37,7 +37,7 @@ from ats_pipeline import (
     DEFAULT_BACKEND, DEFAULT_BASE_URL, DEFAULT_LOCAL_MODELS, DEFAULT_WRITER,
     PipelineError, _same_model, list_local_models, run as ats_run,
 )
-from ats_regions import DEFAULT_REGION, REGIONS as ATS_REGIONS
+from ats_latex import DEFAULT_REGION, REGIONS as ATS_REGIONS
 from company_radar import (
     FormDScanner,
     BoardProber,
@@ -69,16 +69,16 @@ from robotics_track import (
     COUNTRY_NAMES as EU_COUNTRY_NAMES,
 )
 from jobspy_provider import JobSpyProvider, DEFAULT_SITES, INDEED_COUNTRIES
-from ba_jobsuche import BAJobsucheProvider, OFFER_TYPES as BA_OFFER_TYPES
-from personio_jobs import (COMPANIES as PERSONIO_COMPANIES, PersonioCompany, PersonioFeeds,
+from employer_feeds import BAJobsucheProvider, OFFER_TYPES as BA_OFFER_TYPES
+from employer_feeds import (COMPANIES as PERSONIO_COMPANIES, PersonioCompany, PersonioFeeds,
                            slug_candidates as personio_slug_candidates)
-from workday_jobs import SITES as WORKDAY_SITES, WorkdayBoards, parse_url as parse_workday_url
-from research_jobs import SOURCES as RESEARCH_SOURCES, ResearchFeeds
+from employer_feeds import SITES as WORKDAY_SITES, WorkdayBoards, parse_url as parse_workday_url
+from employer_feeds import SOURCES as RESEARCH_SOURCES, ResearchFeeds
 from discover_jobs import REGIONS as DISCOVERY_REGIONS, SOURCES as DISCOVERY_SOURCES, Discovery
 from fit_score import (FitScorer, default_profile_path, is_bundled_copy, load_default_scorer,
                        remember_profile_path, rescore)
 import daily_sweep
-import related_skills
+import fit_score
 import system_checks
 
 # board.country ("DE", "US", "JP", ...) -> jobspy's expected country_indeed spelling
@@ -1540,7 +1540,7 @@ class App(tk.Tk):
         ttk.Spinbox(row4, from_=1, to=30, textvariable=self.sw_ua_days, width=4).pack(side="left")
         ttk.Label(row4, text="days").pack(side="left", padx=4)
 
-        # ── search keywords related to the profile's skills (related_skills.py) ──
+        # ── search keywords related to the profile's skills (fit_score.py) ──
         try:
             prof = json.loads(Path(self.ats_profile_path.get().strip()).read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -1548,8 +1548,8 @@ class App(tk.Tk):
         current = (cfg["workday"]["queries"] + cfg["research"]["keywords"]
                    + [b["query"] for b in cfg["ba"]["searches"]]
                    + cfg["adzuna_eu"].get("roles", []) + cfg["us_asia"].get("fields", []))
-        stored = related_skills.load()
-        sugg = related_skills.keywords(stored, prof, exclude=current)
+        stored = fit_score.load_related()
+        sugg = fit_score.related_keywords(stored, prof, exclude=current)
         sk = self._section(f, "Suggested keywords",
                            lambda: f"{len(sugg)} related to your profile's skills" if sugg
                            else "none yet")
@@ -2299,7 +2299,7 @@ class App(tk.Tk):
             messagebox.showinfo("No boards yet",
                                 "No tracked company has a known job board. Run 'Probe' first.")
             return
-        # Personio boards are read by personio_jobs.py, not robotics_track.py (whose
+        # Personio boards are read by employer_feeds.py, not robotics_track.py (whose
         # ATS list has no Personio): as Board(...) lines they could not be fetched.
         boards = [r for r in rows if r["ats"] != "personio"]
         personio = [r for r in rows if r["ats"] == "personio"]
@@ -2310,13 +2310,13 @@ class App(tk.Tk):
                 f'    Board("{r["name"]}", "{r["ats"]}", "{r["ats_slug"]}", '
                 f'"{r["market"]}", "robotics"),' for r in boards))
         if personio:
-            parts.append("# personio_jobs.py, COMPANIES:\n" + "\n".join(
+            parts.append("# employer_feeds.py, COMPANIES:\n" + "\n".join(
                 f'    PersonioCompany("{r["name"]}", "{r["ats_slug"]}", "{market(r)}", "robotics"),'
                 for r in personio))
         self.clipboard_clear()
         self.clipboard_append("\n\n".join(parts))
         self.log(f"copied {len(boards)} Board(...) entries for robotics_track.py and "
-                 f"{len(personio)} PersonioCompany(...) entries for personio_jobs.py - paste "
+                 f"{len(personio)} PersonioCompany(...) entries for employer_feeds.py - paste "
                  "them there to monitor these companies permanently")
 
     def load_radar(self) -> None:
@@ -2684,7 +2684,7 @@ class App(tk.Tk):
     def _related_skills(self, force: bool = False) -> None:
         """Look up search keywords related to the profile's skills in the background
         (ESCO + the judge model) when the skills changed since the last lookup; see
-        related_skills.py. Shown under Daily sweep -> Suggested keywords."""
+        fit_score.py. Shown under Daily sweep -> Suggested keywords."""
         path = self.ats_profile_path.get().strip() or str(default_profile_path())
         base_url = self.ats_base_url.get().strip() or DEFAULT_BASE_URL
         judge = self.ats_model.get().strip() or DEFAULT_LOCAL_MODELS
@@ -2695,10 +2695,10 @@ class App(tk.Tk):
             except (OSError, ValueError) as exc:
                 self.log(f"[skills] Cannot read {path}: {exc}")
                 return
-            threading.Thread(target=related_skills.refresh, daemon=True, name="related-skills",
+            threading.Thread(target=fit_score.refresh_related, daemon=True, name="related-skills",
                              args=(profile, base_url, judge, log, True)).start()
         else:
-            related_skills.refresh_in_background(path, base_url, judge, log)
+            fit_score.refresh_related_in_background(path, base_url, judge, log)
 
     def _watch_profile(self) -> None:
         """Every 2 minutes: if profile.json was saved since the last look, refresh the

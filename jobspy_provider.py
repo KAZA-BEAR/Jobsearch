@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 jobspy_provider.py — fallback job search via LinkedIn/Indeed/Glassdoor/Google/
 ZipRecruiter scraping (python-jobspy), for when a direct employer ATS board
@@ -13,25 +12,28 @@ all. This module does keyword+location search across public job boards
 instead, so it keeps working even when the per-company board list is stale
 or a company was never on it.
 
-Install: python install_jobspy.py
+Install: python jobspy_provider.py install
 (python-jobspy pins numpy==1.26.3 on PyPI, which has no prebuilt wheel on
 many setups — Python 3.13+, or Linux without a C compiler — and fails to
-build from source. install_jobspy.py installs its other dependencies first,
+build from source. The install command installs its other dependencies first,
 then jobspy itself with --no-deps so it can't pull that pin back in.)
 
 Usage:
     python jobspy_provider.py search "robotics graduate engineer" --location Germany --country-indeed Germany
     python jobspy_provider.py search "mechatronics" --location "Munich, Germany" --country-indeed Germany --sites indeed,linkedin,glassdoor
     python jobspy_provider.py search "new grad robotics" --location "United States" --country-indeed USA --sites indeed,linkedin
+    python jobspy_provider.py install      # install python-jobspy without building numpy
 """
 
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from typing import Iterator
 
 from linkedin_jobs import Job, PROVIDERS, Provider, Store
+
 
 try:
     from jobspy import scrape_jobs
@@ -69,7 +71,7 @@ class JobSpyProvider(Provider):
                  hours_old: int | None = None):
         if scrape_jobs is None:
             raise SystemExit(
-                "python-jobspy is not installed. Run: python install_jobspy.py"
+                "python-jobspy is not installed. Run: python jobspy_provider.py install"
             )
         self.site_name = list(site_name)
         self.country_indeed = country_indeed
@@ -191,8 +193,55 @@ def main() -> None:
     s.add_argument("--remote", action="store_true")
     s.set_defaults(func=cmd_search)
 
+    i = sub.add_parser("install", help="install python-jobspy without building numpy")
+    i.set_defaults(func=lambda _args: install_jobspy())
+
     args = p.parse_args()
     args.func(args)
+
+
+
+# ==========================================================================
+# Installing python-jobspy (was install_jobspy.py)
+#
+# from source.
+# 
+# python-jobspy's published wheel pins numpy==1.26.3 exactly. That version has
+# no prebuilt wheel for newer Python releases (3.13+) or for some Linux setups,
+# so a plain `pip install python-jobspy` falls back to compiling numpy from
+# source — which then fails immediately if no C compiler (cc/gcc/clang) is on
+# PATH:
+# 
+#     ERROR: Unable to detect GNU compiler type
+# 
+# The fix isn't a newer numpy — pip will always try to satisfy jobspy's exact
+# pin. Instead: install jobspy's other dependencies first (letting pip pick
+# whatever prebuilt wheel already exists for numpy/pandas on this platform),
+# then install python-jobspy itself with --no-deps so it can't drag the pinned
+# version back in.
+# ==========================================================================
+
+DEPS = [
+    "numpy", "pandas", "requests", "beautifulsoup4", "pydantic",
+    "tls-client", "markdownify", "regex",
+]
+
+
+def pip(*args: str) -> None:
+    cmd = [sys.executable, "-m", "pip", *args]
+    print(f"$ {' '.join(cmd)}")
+    subprocess.run(cmd, check=True)
+
+
+def install_jobspy() -> None:
+    pip("install", "-U", *DEPS)
+    pip("install", "--no-deps", "-U", "python-jobspy")
+    try:
+        import jobspy  # noqa: F401
+    except ImportError as exc:
+        print(f"\ninstalled, but 'import jobspy' still fails: {exc}", file=sys.stderr)
+        sys.exit(1)
+    print("\npython-jobspy installed and importable.")
 
 
 if __name__ == "__main__":

@@ -8,4 +8,4 @@ pyinstaller>=6.3.0
 # python-jobspy pins numpy==1.26.3 on PyPI, which has no prebuilt wheel on
 # many setups (Python 3.13+, or Linux without a C compiler) and fails to
 # build from source. Install it separately with:
-#   python install_jobspy.py
+#   python jobspy_provider.py install

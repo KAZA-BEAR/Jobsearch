@@ -36,7 +36,7 @@ import ats_checks as checks
 import ats_latex as latex
 import ats_plan as planning
 import ats_prompts as prompts
-from ats_regions import get_region
+from ats_latex import get_region
 
 # "ollama" (its own API), or "openai" for any other OpenAI-compatible server
 # (vLLM, llama.cpp, LocalAI) - point ATS_BASE_URL at it, ending in /v1.

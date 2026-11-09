@@ -34,19 +34,13 @@ a = Analysis(
         'company_radar',
         'ats_prompts',
         'ats_latex',
-        'ats_regions',
         'ats_pipeline',
         'ats_checks',
         'ats_plan',
-        'ats_embed',
         'jobspy_provider',
-        'ba_jobsuche',
-        'personio_jobs',
-        'workday_jobs',
-        'research_jobs',
+        'employer_feeds',
         'fit_score',
         'daily_sweep',
-        'related_skills',
         'system_checks',
         'xml.etree.ElementTree',
         'email.utils',
@@ -72,7 +66,7 @@ a = Analysis(
     excludes=[
         # numpy/pandas/jobspy are NOT excluded: the "Web search (JobSpy)" tab
         # needs them bundled to work in the built .exe (adds ~150 MB — see
-        # install_jobspy.py, which build.bat runs into .venv before this
+        # `jobspy_provider.py install`, which build.bat runs into .venv before this
         # spec's Analysis step picks them up). Everything below genuinely
         # is never imported, so it's still trimmed.
         'matplotlib', 'scipy', 'PIL',
