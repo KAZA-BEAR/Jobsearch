@@ -41,7 +41,6 @@ from ats_regions import get_region
 # "ollama" (its own API), or "openai" for any other OpenAI-compatible server
 # (vLLM, llama.cpp, LocalAI) - point ATS_BASE_URL at it, ending in /v1.
 DEFAULT_BACKEND = os.environ.get("ATS_BACKEND", "ollama")
-DEFAULT_MODEL = os.environ.get("ATS_MODEL", "")          # empty: the first downloaded model
 DEFAULT_BASE_URL = os.environ.get("ATS_BASE_URL", "http://localhost:11434")
 ROOT = Path(__file__).resolve().parent   # flat layout: all files in one folder
 
@@ -249,13 +248,22 @@ DEFAULT_LOCAL_MODELS = os.environ.get("ATS_MODELS", "qwen3.5:4b")
 # Gemma 4 12B replaced Bonsai 27B (1-bit) on 2026-11-05: on three test jobs no letter
 # needed padding from the profile (Bonsai: 2 of 3) and the letters named more of what
 # the job asks for, at about twice the run time (7.2 GB, partly in system memory).
+# Qwen3.5-9B was tried instead on 2026-11-08 (same ten jobs and code): 42 s faster per
+# job and smoother, but the fact-check deleted 4 of its sentences (Gemma 4: none), 3
+# letters needed padding (Gemma 4: none), it shortened "a ROS2 package and simulation"
+# to "a ROS2 package for simulation", and dropped the UAV object detection for a
+# computer-vision role. Gemma 4 stays.
 DEFAULT_WRITER = os.environ.get("ATS_WRITER", "gemma4:12b-it-qat")
+# The judge for callers that name no model. It was "" (the first model Ollama had
+# loaded), so a script that left `model` out ran the 12B writer as the judge too
+# (2026-11-05). An empty Judge field in the app still means "the first loaded model".
+DEFAULT_MODEL = os.environ.get("ATS_MODEL") or DEFAULT_LOCAL_MODELS
 # Context each model runs with (sent as num_ctx on every request). A model's own
 # maximum (131072 for Llama) filled the GPU with working memory so the second
 # model could not load.
 MODEL_CONTEXT = {"qwen3:4b-instruct-2507-q4_K_M": 6144, "llama3.2:3b": 6144,
                  "hf.co/prism-ml/Bonsai-27B-gguf:Q1_0": 6144, "qwen3.5:4b": 6144,
-                 "gemma4:12b-it-qat": 6144}
+                 "gemma4:12b-it-qat": 6144, "qwen3.5:9b": 6144}
 DEFAULT_CONTEXT = 6144
 
 
@@ -539,22 +547,66 @@ def tailor_experience(profile, job_description, plan, lang, call, forbidden, log
     return result, notes
 
 
-def candidate_facts(profile: dict, requirements: list, meta: dict = None) -> str:
+# Course and interest words that say nothing about the field ("Additive Manufacturing
+# Processes and Technologies" matched any ad that mentions "processes").
+_COURSE_GENERIC = frozenset({"process", "technolog", "system", "design", "method", "engineer",
+                             "fundament", "introduct", "advanc", "principl", "applic", "theori",
+                             "analysi", "interfac", "human", "machin", "digital", "integrat"})
+
+
+def _matching(items: list, stems: set) -> list:
+    """The coursework or interests that this job is about: every field word of a one-
+    or two-word item, two thirds of a longer one, appear in the job. Every letter listed
+    all four research interests and the additive-manufacturing course, whatever the
+    job (10 of 10 letters, 2026-11-05); "Digital Twin" then matched a test role on
+    "digital" alone."""
+    out = []
+    for item in items or []:
+        own = {s for s in _relevance_stems(item) if not any(s.startswith(g) for g in _COURSE_GENERIC)}
+        hit = len(own & stems)
+        if own and (hit == len(own) if len(own) <= 2 else 3 * hit >= 2 * len(own)):
+            out.append(item)
+    return out
+
+
+def _job_relevance(job_text: str, role: str, requirements: list):
+    """Score for ranking profile lines against a job: the requirements' and the job
+    title's words count three times, the rest of the ad once. By the whole ad alone,
+    the long avionics bullet outranked the UAV object detection for a computer-vision
+    internship (ZEISS, 2026-11-05)."""
+    core = _relevance_stems(" ".join([role or ""] + [f"{r.get('skill', '')} {r.get('quote', '')}"
+                                                     for r in requirements]))
+    wide = _relevance_stems(job_text or "")
+
+    def score(line: str) -> int:
+        stems = _relevance_stems(line)
+        return 3 * len(stems & core) + len(stems & wide)
+    return score
+
+
+def candidate_facts(profile: dict, requirements: list, meta: dict = None,
+                    job_text: str = "") -> str:
     """What the letter may say: studies, summary, languages, and the profile lines
-    that prove this job's requirements (all profile lines if none were found).
-    The role applied for is listed too: without it the model's fact-check deleted
-    the letter's opening ("The ... role at Quantum Systems fits my studies") as
-    "not in the facts", and the letter started mid-argument."""
+    that prove this job's requirements, then every other profile line, most relevant
+    to the job first. The role applied for is listed too: without it the model's
+    fact-check deleted the letter's opening ("The ... role at Quantum Systems fits my
+    studies") as "not in the facts", and the letter started mid-argument.
+    With `job_text`, coursework and research interests are cut to those that match."""
     lines = []
     role, company = (meta or {}).get("role"), (meta or {}).get("company")
     if role or company:
         lines.append("Applying for: " + " at ".join(x for x in (role, company) if x))
     lines.append(f"Summary: {profile.get('profile_summary', '')}")
+    stems = _relevance_stems(" ".join([job_text, role or ""] + [
+        f"{r.get('skill', '')} {r.get('quote', '')}" for r in requirements])) if job_text else None
     for ed in profile.get("education") or []:
+        courses = ed.get("coursework") or []
+        interests = ed.get("research_interests") or []
+        if stems is not None:
+            courses, interests = _matching(courses, stems), _matching(interests, stems)
         lines.append(f"Education: {ed['degree']}, {ed['institution']} ({ed['start']} - {ed['end']})"
-                     + (f"; coursework: {', '.join(ed['coursework'])}" if ed.get("coursework") else "")
-                     + (f"; research interests: {', '.join(ed['research_interests'])}"
-                        if ed.get("research_interests") else "")
+                     + (f"; coursework: {', '.join(courses)}" if courses else "")
+                     + (f"; research interests: {', '.join(interests)}" if interests else "")
                      + (f"; thesis: {ed['thesis']}" if ed.get("thesis") else ""))
     proof = []
     for r in requirements:
@@ -562,10 +614,28 @@ def candidate_facts(profile: dict, requirements: list, meta: dict = None) -> str
             proof += [e for e in r["evidence"] if e not in proof]
     # Then every other profile line: all of it is true, and a fact list of only the
     # proven lines made the checker delete true claims ("the facts do not mention
-    # any UAV" about the candidate's own UAV project).
-    proof += [u for u in (f"{label}: {line}" for label, line in planning.evidence_units(profile))
-              if u not in proof]
-    lines += proof
+    # any UAV" about the candidate's own UAV project). Most relevant first: the
+    # writer took the same two bullets for every job and left out the UAV object
+    # detection for a computer-vision internship (ZEISS, 2026-11-05).
+    rest = [u for u in (f"{label}: {line}" for label, line in planning.evidence_units(profile))
+            if u not in proof]
+    if stems is not None:
+        score = _job_relevance(job_text, role, requirements)
+        rest.sort(key=lambda u: -score(u))
+        # the per-degree course lines ("Education: B.Sc ...: Power Electronics, ...")
+        # list every course again: the same cut as above
+        degrees = {ed["degree"] for ed in profile.get("education") or []}
+        cut = []
+        for u in rest:
+            head, _, items = u.partition(": ")[2].partition(": ")
+            if u.startswith("Education: ") and head in degrees and items:
+                kept = _matching([c.strip() for c in items.split(",")], stems)
+                if kept:
+                    cut.append(f"Education: {head}: {', '.join(kept)}")
+                continue
+            cut.append(u)
+        rest = cut
+    lines += proof + rest
     lines.append("Languages: " + ", ".join(f"{l['language']} ({l['level']})"
                                           for l in profile.get("languages") or []))
     if profile.get("additional_context"):
@@ -573,7 +643,7 @@ def candidate_facts(profile: dict, requirements: list, meta: dict = None) -> str
     return "\n".join(f"- {l}" for l in lines)
 
 
-def job_brief(job_description: str, meta: dict, requirements: list) -> str:
+def job_brief(job_description: str, meta: dict, requirements: list, profile: dict = None) -> str:
     """What the letter model sees of the job: role, a short opening of the ad, and
     each requirement the profile proves paired with the line that proves it.
 
@@ -604,6 +674,20 @@ def job_brief(job_description: str, meta: dict, requirements: list) -> str:
         else:
             lines.append(f"   proof (listed only - name it, do not describe work with it): "
                          f"{r['evidence'][0]}")
+    # Work that fits the job without proving an extracted requirement: the UAV object
+    # detection for a 3D computer-vision internship, the PCB design for a hardware
+    # internship - both left out while the same two bullets went into every letter
+    # (ZEISS, sewts, 2026-11-05).
+    if profile is not None:
+        score = _job_relevance(job_description, meta.get("role", ""), requirements)
+        shown = {e for r in matched for e in r["evidence"]}
+        other = [u for u in (f"{label}: {line}" for label, line in planning.evidence_units(profile))
+                 if _FACT_LINE.match(u) and u not in shown]
+        other = sorted(other, key=lambda u: -score(u))
+        other = [u for u in other[:2] if score(u) >= 4]
+        if other:
+            lines += ["", "Other work of the candidate that fits this job:"]
+            lines += [f"- {u}" for u in other]
     return "\n".join(lines)
 
 
@@ -845,6 +929,37 @@ def _added_tools(sentence: str, facts: list, profile: dict) -> list:
     return sorted(n for n in names if len(n) > 1 and found(n, sentence) and not found(n, hay))
 
 
+# Words that tie a sentence to a job or project: "for these tasks", "in that role",
+# "my work involved", "during my time as ...", "As a Student Assistant ...".
+_WORK_LINK = re.compile(r"\b(?:th(?:ese|ose|is|at)\s+(?:tasks?|work|roles?|projects?|positions?|"
+                        r"jobs?)|in (?:that|this|my) (?:role|position|job)|my work|there\b|"
+                        r"during my time|while (?:working|serving)|as an?\s+\w)", re.I)
+
+
+def _tool_moved_to_work(sentence: str, facts: list, profile: dict) -> list:
+    """Skills-list tools a sentence ties to a job or project whose bullets and tools
+    do not name them: "I used Solidworks for these tasks" after the SOCO coding
+    sentence, "I also used ROS2 and Gazebo during my time as a Student Assistant"
+    (2026-11-05). The skills line shows the candidate knows a tool, not where they
+    used it, and the judge passed both because the skills fact names the tool."""
+    def found(name, text):
+        return re.search(rf"(?<![\w+]){re.escape(name)}(?![\w+])", text, re.I)
+    work = [" ".join((e.get("bullets") or []) + (e.get("tools") or []))
+            for e in profile.get("experience") or []]
+    work += [" ".join(p.get("bullets") or []) for p in profile.get("projects") or []]
+    listed = {re.sub(r"\s*\(.*?\)", "", v).strip()
+              for vals in (profile.get("skills") or {}).values() for v in vals}
+    named = [n for n in listed if len(n) > 1 and found(n, sentence)
+             and not any(found(n, w) for w in work)]
+    if not named:
+        return []
+    places = [x for e in profile.get("experience") or [] for x in (e.get("employer"), e.get("title"))]
+    places += [p.get("name") for p in profile.get("projects") or []]
+    linked = (any(_FACT_LINE.match(f) for f in facts) or _WORK_LINK.search(sentence)
+              or any(p and p.lower() in sentence.lower() for p in places))
+    return sorted(named) if linked else []
+
+
 MAX_WORK_FACTS = 4
 # a sentence that leans on the one before: "This reduced ...", "The automation cut ..."
 _ANAPHOR = re.compile(r"^(?:This|These|That|Those|It|Such|The (?:automation|change|changes|work|"
@@ -980,10 +1095,15 @@ def _cited_check(raw: str, ids: dict, call, profile: dict, fact_lines: list,
         keep = []
         for sentence, cited in para:
             flat = " ".join(sentence.split())
+            facts = [ids[i] for i in sorted(cited) if i in ids]
+            moved = _tool_moved_to_work(flat, facts, profile)
+            if moved:
+                removed.append(f"{flat} (ties {', '.join(moved)} from your skills list to work "
+                               "that does not mention it)")
+                continue
             if flat.endswith("?") or checks._LEARNING.search(flat) or _ENTHUSIASM.search(flat):
                 keep.append((flat, []))
                 continue
-            facts = [ids[i] for i in sorted(cited) if i in ids]
             work = [f for f in facts if _FACT_LINE.match(f)]
             if facts:
                 extra = _added_tools(flat, facts, profile)
@@ -1155,11 +1275,14 @@ _TAIL_TALK = re.compile(r"\b(interest\w*|keen|eager|languages?|native|fluent\w*|
 _INTRO_TALK = re.compile(r"\b(apply\w*|application|position|role)\b", re.I)
 
 
-def _add_studies(letter: str, profile: dict, requirements=()) -> str:
+def _add_studies(letter: str, profile: dict, requirements=(), job_text: str = "") -> str:
     """A paragraph with a degree's courses and the languages, in the profile's own
     words, before the closing - for a true letter that is short. The degree whose
     courses match the job's met requirements is used, else the current one; parts
-    the letter already says are skipped."""
+    the letter already says are skipped. With `job_text`, only courses that match the
+    job go in, and the languages only when the ad asks about German or English: a
+    computer-vision letter was padded with all three M.Eng courses (Additive
+    Manufacturing among them) and the candidate's language levels (ZEISS, 2026-11-08)."""
     paras = [p for p in re.split(r"\n\s*\n", letter) if p.strip()]
     if not paras:
         return letter
@@ -1180,6 +1303,10 @@ def _add_studies(letter: str, profile: dict, requirements=()) -> str:
             else None
     courses = sorted((c for c in (chosen or {}).get("coursework") or [] if c.lower() not in flat),
                      key=lambda c: -hits(c))
+    if job_text:
+        stems = _relevance_stems(" ".join([job_text] + [f"{r.get('skill', '')} {r.get('quote', '')}"
+                                                        for r in requirements]))
+        courses = _matching(courses, stems)
     # one coursework sentence per letter: the letter's own "My M.Eng coursework
     # includes Autonomous Systems." plus an added "My M.Eng coursework includes AR/VR
     # ..." read as a repeat (ZEISS, 2026-10-12)
@@ -1190,7 +1317,9 @@ def _add_studies(letter: str, profile: dict, requirements=()) -> str:
         extra.append(f"My {degree} coursework {'includes' if now else 'included'} {pairs[0]}."
                      + (f" It also {'covers' if now else 'covered'} {', as well as '.join(pairs[1:])}."
                         if pairs[1:] else ""))
-    if not _LANGUAGE_TALK.search(flat):
+    asks_language = not job_text or re.search(r"\b(?:deutsch\w*|german|englisch\w*|english)\b",
+                                              job_text, re.I)
+    if asks_language and not _LANGUAGE_TALK.search(flat):
         extra += _languages_sentences(profile.get("languages") or [])
     if extra:
         closed = bool(_HAS_CLOSING.search(paras[-1]))
@@ -1225,10 +1354,12 @@ def _reparagraph(letter: str) -> str:
     return "\n\n".join(" ".join(p) for p in paras if p)
 
 
-def _top_up(letter: str, profile: dict, requirements: list, words: int = 150) -> str:
+def _top_up(letter: str, profile: dict, requirements: list, words: int = 150,
+            job_text: str = "") -> str:
     """Add up to two profile bullets the letter does not use yet, as first-person
     sentences, to the paragraph before the closing one - most relevant first (a
-    bullet proving a requirement), then the most recent roles."""
+    bullet proving a requirement, then, with `job_text`, the bullets closest to the
+    job), then the most recent roles."""
     paras = [p for p in letter.split("\n\n") if p.strip()]
     if len(paras) < 2:
         return letter
@@ -1240,7 +1371,8 @@ def _top_up(letter: str, profile: dict, requirements: list, words: int = 150) ->
         lines += [f"{e['title']} @ {e['employer']}: {b}" for b in e.get("bullets") or []]
     for p in profile.get("projects") or []:
         lines += [f"Project: {p['name']}: {b}" for b in p.get("bullets") or []]
-    lines.sort(key=lambda l: l.split(": ", 1)[-1] not in proven)    # stable: recency kept
+    score = _job_relevance(job_text, "", requirements) if job_text else (lambda l: 0)
+    lines.sort(key=lambda l: (l.split(": ", 1)[-1] not in proven, -score(l)))   # stable: recency kept
     added = []
     for line in lines:
         if len(letter.split()) + sum(len(a.split()) for a in added) >= words or len(added) == 2:
@@ -1951,6 +2083,157 @@ def _place_fix(sentence: str, previous: str, profile: dict) -> str:
     return f"{here}, {rest}"
 
 
+# "Pakistan Ordnance Factories was my workplace as an Electrical Engineer."
+_WORKPLACE = re.compile(r"^(?:At\s+)?(?:the\s+)?(?P<place>[^.]+?) was my (?:workplace|employer) as "
+                        r"(?P<role>an? [^.]+?)\.$")
+# Lines that say nothing the letter needs: "Technische Hochschule Deggendorf is my
+# current school." (the opening names the studies), "This work is part of my project
+# ..." after the project's own sentence.
+_EMPTY_LINE = re.compile(r"^(?:[^.]+ is my current (?:school|university)\.|This (?:work|project) "
+                         r"(?:is|was) part of\b.*)$", re.I)
+
+
+def _plain_phrasing(text: str, profile: dict) -> str:
+    """The Gemma 4 writer's stiff turns, said plainly (10 new jobs, 2026-11-08):
+    "<place> was my workplace as <role>." -> "I worked as <role> at <place>.", empty
+    lines dropped, and "There, I also ..." after a sentence that only names the role
+    loses its "also" (nothing came before it to add to)."""
+    out = []
+    for para in re.split(r"\n\s*\n", (text or "").strip()):
+        sents = []
+        for s in (x for x in re.split(r"(?<=[.!?])\s+", para.strip()) if x):
+            m = _WORKPLACE.match(s)
+            if m:
+                place = m.group("place").strip()
+                the = "the " if place.split()[0].lower() in _PLACE_ARTICLE else ""
+                s = f"I worked as {m.group('role')} at {the}{place}."
+            if _EMPTY_LINE.match(s):
+                continue
+            if sents and re.match(r"^(?:There|In that role), I also ", s) and re.search(
+                    r"\bI (?:served|worked) as [^,]*\.$", sents[-1]):
+                s = s.replace(" I also ", " I ", 1)
+            sents.append(s)
+        if sents:
+            out.append(" ".join(sents))
+    return "\n\n".join(out)
+
+
+def _join_split_bullets(text: str, profile: dict) -> str:
+    """Two short sentences that are one profile bullet cut in half become the bullet
+    again: "I wrote and debugged C++/Python code. I added one new feature and test case
+    to the computation engine." read like a list (3 of 10 letters, 2026-11-08). Only
+    past-tense bullets, in the profile's own words; a place before the first "I" stays."""
+    places = checks._content_stems(" ".join(
+        [f"{e.get('title', '')} {e.get('employer', '')}" for e in profile.get("experience") or []]
+        + [p.get("name", "") for p in profile.get("projects") or []]))
+    bullets = []
+    sources = [(x, "At " + ("the " if str(e.get("employer", "")).split()[:1] and
+                            str(e.get("employer")).split()[0].lower() in _PLACE_ARTICLE else "")
+                + str(e.get("employer", "")) + ", ")
+               for e in profile.get("experience") or [] for x in e.get("bullets") or []]
+    sources += [(x, f"In the {p.get('name', '')} project, ")
+                for p in profile.get("projects") or [] for x in p.get("bullets") or []]
+    for b, where in sources:
+        first = b.split()[0].lower() if b.split() else ""
+        if first.endswith("ed") or first in checks._IRREGULAR:
+            bullets.append((b.strip().rstrip("."), checks._content_stems(b) - places, where))
+
+    def own(s):        # without its "At <place>, " / "As <role> at <place>, " opener
+        return checks._content_stems(re.sub(r"^[^.]*?,\s+(?=I\s)", "", s)) - places
+    out = []
+    for para in re.split(r"\n\s*\n", (text or "").strip()):
+        sents = [x for x in re.split(r"(?<=[.!?])\s+", para.strip()) if x]
+        k, kept = 0, []
+        while k < len(sents):
+            a = sents[k]
+            b = sents[k + 1] if k + 1 < len(sents) else ""
+            merged = ""
+            sa, sb = own(a), own(b)
+            for bullet, bs, where in bullets if b and sa and sb else []:
+                # together they say the bullet, and each says only bullet things
+                if (len(bs) >= 4 and len((sa | sb) & bs) >= 0.8 * len(bs)
+                        and len(sa & bs) >= 0.6 * len(sa) and len(sb & bs) >= 0.6 * len(sb)):
+                    lead = next((x[:x.index("I ")] for x in (a, b)
+                                 if re.search(r"^[^.]*?,\s+I\s", x)), "")
+                    # a place said at the end ("... code as an Engineer at SOCO.") is
+                    # kept at the front: dropping it lost the employer (2026-11-08)
+                    if not lead and _names_place(f"{a} {b}", profile):
+                        lead = where
+                    merged = f"{lead}I {bullet[0].lower()}{bullet[1:]}."
+                    break
+            if merged:
+                kept.append(merged)
+                k += 2
+            else:
+                kept.append(a)
+                k += 1
+        out.append(" ".join(kept))
+    return "\n\n".join(out)
+
+
+def _resolve_deictics(text: str, profile: dict) -> str:
+    """Last pass over the finished letter: "In that role," / "There," must point at the
+    place named last. After the opening was added and sentences were removed, "In that
+    role, I built and tested a 4-DOF manipulator ..." followed the SOCO sentence and
+    made the Robotics Lab's work SOCO's (Rheinmetall, 2026-11-05)."""
+    out, last = [], ""
+    for para in re.split(r"\n\s*\n", (text or "").strip()):
+        sents = []
+        for s in (x for x in re.split(r"(?<=[.!?])\s+", para.strip()) if x):
+            if _DEICTIC.match(s):
+                s = _fix_place(s, last, profile)
+            if _names_place(s, profile):
+                last = s
+            sents.append(s)
+        out.append(" ".join(sents))
+    return "\n\n".join(out)
+
+
+_MONTHS = {m: i for i, m in enumerate(("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug",
+                                        "sep", "oct", "nov", "dec"), 1)}
+# "Earlier, ..." / "Previously, I ..." / "Before that, ..." at the start of a sentence
+_SEQUENCE = re.compile(r"^(?:earlier|previously|before that|before this|prior to that)\s*,?\s+", re.I)
+
+
+def _started(text: str) -> tuple:
+    """(year, month) of the first date in a profile date ("Jun 2026", "2019, 2020")."""
+    m = re.search(r"(?:([A-Za-z]{3})\w*\s+)?((?:19|20)\d\d)", text or "")
+    if not m:
+        return ()
+    return int(m.group(2)), _MONTHS.get((m.group(1) or "").lower()[:3], 1)
+
+
+def _true_sequence(text: str, profile: dict) -> str:
+    """Drop "Earlier," / "Previously," when the work is not older than the work named
+    before it: "Earlier, as a Student Assistant at the Robotics Lab, I built ..."
+    followed the 2023 SOCO job, though the lab job started in 2026 (Qwen3.5-9B writer,
+    ZEISS 2026-11-08). The dates come from the profile; an unknown date drops it too."""
+    when = {}
+    for e in profile.get("experience") or []:
+        when[str(e.get("employer", "")).split(",")[0].lower()] = _started(str(e.get("start", "")))
+    for p in profile.get("projects") or []:
+        when[str(p.get("name", "")).lower()] = _started(str(p.get("year", "")))
+
+    def date_of(sentence):
+        place = _place_of(sentence, profile).lower()
+        return next((d for name, d in when.items() if name and name in place), ())
+
+    out, last = [], ()
+    for para in re.split(r"\n\s*\n", (text or "").strip()):
+        sents = []
+        for s in (x for x in re.split(r"(?<=[.!?])\s+", para.strip()) if x):
+            m = _SEQUENCE.match(s)
+            here = date_of(s[m.end():] if m else s)
+            if m and not (here and last and here < last):
+                rest = s[m.end():]
+                s = rest[:1].upper() + rest[1:]
+            if here:
+                last = here
+            sents.append(s)
+        out.append(" ".join(sents))
+    return "\n\n".join(out)
+
+
 def _tidy_recruiter(text: str, profile: dict) -> str:
     """The letter's inference and place rules for the recruiter message, sentence by
     sentence; _complete_recruiter refills a part this leaves empty."""
@@ -2038,6 +2321,10 @@ def _tidy_letter(text: str, profile: dict, role: str = "", ad: str = "",
                     continue
                 applied = True
             if _TRIVIAL_GAP.search(s) and re.search(r"\b(learn\w*|keen|eager)\b", s, re.I):
+                continue
+            # No wish to learn at all: in 41 of 66 letters it pointed at a gap, some
+            # oddly ("I am keen to learn about real-world scenarios", 2026-11-05).
+            if _GAP_WISH.search(s):
                 continue
             if _THIRD_PERSON.match(s) and not _backed_by_profile(s, profile):
                 continue
@@ -2186,6 +2473,13 @@ def _keen_not_lack(sentence: str) -> str:
             "experience", "knowledge", "skills", "skill", "a", "any", "the", "much", "enough"):
         return sentence
     return f"I am keen to learn {m.group('x').strip()}."
+
+
+# "I am keen to learn Inventor", "I want to learn Kartierungsalgorithmen": a letter
+# says what the candidate has done, not which requirement they miss.
+_GAP_WISH = re.compile(r"\b(?:keen|eager|excited|happy|motivated|looking forward|want|wish|"
+                       r"hope|would like|plan)\s+(?:to\s+)?(?:learn|gain|deepen|acquire|"
+                       r"expand|broaden)\w*|\binterested in learning\b", re.I)
 
 
 # "I am keen to learn about the specific requirements for this role at Thales" -
@@ -2353,13 +2647,6 @@ def profile_letter(profile: dict, meta: dict, requirements: list, gap_names: lis
     if more_skills:
         p3.append("My skills also include " + (" and ".join(more_skills) if len(more_skills) <= 2
                   else ", ".join(more_skills[:-1]) + " and " + more_skills[-1]) + ".")
-    # Only extracted requirements: the keyword fallback in gap_names once made this
-    # "I am keen to learn similar in practice" (from "or similar simulation tools").
-    real_gaps = [g for g in gap_names
-                 if any(r["skill"] == g and r["status"] == "gap" for r in requirements)
-                 and not _TRIVIAL_GAP.search(g)]
-    if real_gaps:
-        p3.append(f"I am keen to learn {real_gaps[0]} in practice.")
     p3 += _languages_sentences(profile.get("languages") or [])
     return "\n\n".join(p for p in (p1, p2, " ".join(p3), _CLOSING) if p.strip())
 
@@ -2415,9 +2702,22 @@ def _frame_letter(text: str, profile: dict, meta: dict, log) -> str:
         # (Fraunhofer, 2026-10-04).
         schools = set().union(*[checks._content_stems(ed.get("institution", ""))
                                 for ed in profile.get("education") or []] or [set()]) - said
+        # Nor do the verbs around a degree: "I hold a Bachelor's degree in electrical
+        # engineering." was 3 of 4 under "My bachelor's degree is in electrical
+        # engineering." and stayed (3 letters, 2026-11-05).
+        schools |= checks._content_stems("hold holds have has completed earned obtained possess "
+                                         "finished studied") - said
+        # ... and the words around a restated summary or study line: "My interests are
+        # robotics, AI and autonomous systems.", "My current studies involve an M.Eng
+        # ..." both stood under the opening that said it (2026-11-08)
+        schools |= checks._content_stems("interest interests current currently studies study "
+                                         "involve involves include includes program") - said
 
         def repeats(x):
             own = checks._content_stems(x) - schools
+            # a second "I am an aspiring Mechatronics Engineer ..." in other words
+            if re.search(r"\baspiring\b", x, re.I) and re.search(r"\baspiring\b", opening, re.I):
+                return True
             return own and len(own & said) / len(own) >= 0.8
         kept = []
         for p in paras:
@@ -2608,9 +2908,9 @@ def write_texts(profile, job_description, lang, gaps, recruiter, call, log, forb
     # requirement of 'Sehr gute Deutsch- und Englischkenntnisse'" (German unmet).
     requirements = [r for r in requirements if r.get("source") != "languages"]
     brief = job_brief(job_description, meta or checks.parse_header(job_description),
-                      list(requirements))
+                      list(requirements), profile)
     facts = candidate_facts(profile, list(requirements),
-                            meta or checks.parse_header(job_description))
+                            meta or checks.parse_header(job_description), job_description)
     results, issues, removed_all = {}, [], []
     # One letter writer that is not the judge: it writes, rewrites and restyles; the
     # judge (`call`) still fact-checks everything it writes.
@@ -2686,10 +2986,10 @@ def write_texts(profile, job_description, lang, gaps, recruiter, call, log, forb
             # 137-word, one-paragraph draft went to the profile fallback, 2026-10-04).
             # Studies and languages first: a draft that already has its four work
             # examples cannot take more (Magazino: 106 true words, 2026-10-04).
-            mended = _add_studies(_reparagraph(text), profile, list(requirements))
+            mended = _add_studies(_reparagraph(text), profile, list(requirements), job_description)
             again = check(mended) + checks.gap_claims(mended, forbidden)
             if any(p.startswith("cover letter has") for p in again):
-                mended = _top_up(mended, profile, list(requirements))
+                mended = _top_up(mended, profile, list(requirements), job_text=job_description)
                 again = check(mended) + checks.gap_claims(mended, forbidden)
             if not any(p.startswith("cover letter has") for p in again):
                 log("The cover letter was one block or a little short; split it into "
@@ -2851,7 +3151,7 @@ def write_texts(profile, job_description, lang, gaps, recruiter, call, log, forb
                 # A few words short: add the candidate's own unused bullets rather than
                 # throw the letter away (ZEISS: 144 of 150 words went to the profile
                 # fallback, 2026-10-03).
-                topped = _top_up(best, profile, list(requirements))
+                topped = _top_up(best, profile, list(requirements), job_text=job_description)
                 if topped != best:
                     again = check(topped) + checks.gap_claims(topped, forbidden)
                     if not any(p.startswith("cover letter has") for p in again):
@@ -2877,6 +3177,9 @@ def write_texts(profile, job_description, lang, gaps, recruiter, call, log, forb
         style["built_from_profile"] = built
         results[f"{field}_style"] = style
         # last, after every check: prose conventions ("one new feature", not "1 new ...")
+        if best and field == "cover_letter":
+            best = _join_split_bullets(_plain_phrasing(best, profile), profile)
+            best = _true_sequence(_resolve_deictics(best, profile), profile)
         results[field] = _polish_prose(_true_role(_true_names(best, profile),
                                                   (meta or {}).get("role", ""))) if best else best
         issues += best_problems
@@ -3160,7 +3463,7 @@ def _first_chat_model(base_url):
 def prepare(job_description: str, region_code: str, profile_path: Path = None,
             recruiter: str = "", notes: str = "", model: str = DEFAULT_MODEL,
             api_key: str = None, backend: str = DEFAULT_BACKEND, base_url: str = None,
-            max_tokens: int = 1500, log=print, writers: str = None) -> dict:
+            max_tokens: int = 1500, log=print, writers: str = DEFAULT_WRITER) -> dict:
     """Stages 1-4: check the profile, read the job, analyse gaps, plan the edits.
     Nothing is written yet; the returned plan can be reviewed and edited.
     `writers`: the model(s) that write the cover letter and recruiter message; when
@@ -3319,7 +3622,7 @@ def run(job_description: str, region_code: str, profile_path: Path = None,
         notes: str = "", model: str = DEFAULT_MODEL, compile_pdf: bool = False,
         api_key: str = None, backend: str = DEFAULT_BACKEND, base_url: str = None,
         max_tokens: int = 1500, cover: bool = True, approve=None, log=print,
-        writers: str = None):
+        writers: str = DEFAULT_WRITER):
     """Tailor the CV (and optionally a cover letter) for one job.
 
     The CV comes from profile.json; the model only rewords experience bullets,

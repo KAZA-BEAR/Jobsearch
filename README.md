@@ -155,15 +155,26 @@ To use other models, change **Judge model** and
 `--model` / `--writer`.
 
 Notes from testing on an RTX 3050 (6 GB, 32 GB RAM), Ollama 0.40:
-- One job takes about **3½–5 minutes** (200–290 s over three jobs on 2026-11-05), most
-  of it the writer's two drafts (55–85 s each) and the judge's fact-checks. The first
+- One job takes about **3–4½ minutes** (175–270 s over ten jobs on 2026-11-08), most
+  of it the writer's two drafts (about 110 s together) and the judge's checks. The first
   run after Ollama starts takes several minutes longer while both models load from
   disk. Each run's `run_log.txt` shows where the time went.
 - The writer (7.2 GB) does not fit on a 6 GB GPU, so part of it runs from system
   memory; Ollama swaps it with the judge between steps (already included above).
+- Writers compared on the same ten jobs (2026-11-08), judge `qwen3.5:4b`:
+  - `gemma4:12b-it-qat` (default): no sentence cut by the fact-check, no letter padded
+    from your profile, and it keeps the experience that fits each job; about 112 s of
+    writing per job. Watch for small grammar slips ("building and tested").
+  - `qwen3.5:9b`: about 40 s faster per job and smoother, but the fact-check cut 4 of
+    its sentences, 3 letters needed padding with languages and coursework, and it
+    shortened facts ("a ROS2 package for simulation"). Its "Earlier," / "Previously,"
+    are removed when your profile's dates say otherwise.
+- Judges compared on the same ten jobs: `granite4.2:8b` proved half as many
+  requirements as `qwen3.5:4b` (23 vs 46), found almost none on two ads, and took
+  about 50% longer - `qwen3.5:4b` stays the judge.
 - Compared on the same three jobs (2026-11-05), against the previous pair (Qwen3-4B
   judge + 1-bit Bonsai-27B writer, about 2–2½ minutes per job):
-  - Gemma 4 writer: no letter needed padding from your profile (Bonsai: 2 of 3), fewer
+  - Gemma 4 writer (then the default): no letter needed padding from your profile (Bonsai: 2 of 3), fewer
     fact-check deletions, and the letters name more of what the job asks for (Docker,
     Git, Linux for a test role; SLAM for a mapping thesis). Recruiter questions became
     specific.
@@ -316,7 +327,20 @@ employer boards are under Find jobs → Graduate employer boards → *Region*.
 
 Everything the command-line scripts below can do is also in the app.
 
-**Daily sweep** (Settings → Daily sweep…) shows only the fit alert and the Windows schedule; the sources, startup/notification options and search terms are in sections you open (**Sources ▸**, **Startup & notifications ▸**, **Search terms ▸**), each showing a summary while closed. It can also cover Adzuna Europe and the US and
+**Suggested keywords** (Settings → Daily sweep… → **Suggested keywords ▸**): whenever the
+skills in `profile.json` change, the app looks up, in the background, other words job ads
+use for them. Each skill is searched in [ESCO](https://esco.ec.europa.eu/), the EU's free
+skills database (names in English and German, alternative names, linked skills), and your
+local judge model keeps only real matches (ESCO matched "SLAM" to "Islam") and adds up to
+three common job-ad terms of its own, e.g. KiCAD → "PCB design", "schematic capture";
+SPI → "Serial Peripheral Interface". Select suggestions and add them to a search list
+(research keywords, Workday, Arbeitsagentur, Adzuna or US & Asia), then **Save**. They only
+widen the searches: the fit score, CV and letters never use them. The check runs at start,
+when you pick a profile and every two minutes while the app is open; only new skills are
+looked up (about 5 s each; about 3 minutes for a whole profile). Results are kept in
+`related_skills.json` in the data folder; **Look up again** redoes them all.
+
+**Daily sweep** (Settings → Daily sweep…) shows only the fit alert and the Windows schedule; the sources, startup/notification options, search terms and suggested keywords are in sections you open one at a time (**Sources ▸**, **Startup & notifications ▸**, **Search terms ▸**, **Suggested keywords ▸**), each showing a summary while closed. It can also cover Adzuna Europe and the US and
 Asia-Pacific: US & Asia employer boards, USAJOBS, Adzuna and MyCareersFuture. They are
 off by default. Set their search terms, countries and posting age in the same window.
 Adzuna Europe searches by role (e.g. `Werkstudent`) plus any of a list of field words
@@ -381,7 +405,8 @@ python discover_jobs.py sites https://www.example-robotics.de   # read any compa
 ## How CV and letter generation works
 
 ```
-job ad ──► 1  requirements (quote-verified) + job title/company
+job ad ──► 1  requirements (quote-verified, skill names in English even for a
+              German ad) + job title/company
            2  gap analysis: vocabulary → meaning-based matching (embeddings)
               → judge verifies the top-3 profile lines ("yes / partly / no");
               a job or project bullet naming the skill beats a skills-list line
@@ -390,22 +415,30 @@ job ad ──► 1  requirements (quote-verified) + job title/company
            5  recruiter message (3 sentences) by the writer: intro, one real job
               or project example, one question; fact-checked, missing parts
               completed in code
-           6  cover letter by the writer, from numbered facts (F1, F2, …):
-              every sentence cites the fact(s) it uses
-              → each sentence checked against its own cited facts (judge + code);
-                one that says more is replaced with the profile's own line, or
-                dropped when the letter already states that fact
+           6  cover letter by the writer, from numbered facts (F1, F2, …), your
+              profile lines ranked by relevance to the job, with only the
+              courses and research interests that match it; the job brief also
+              names up to two more of your work examples that fit
+              → every sentence cites the fact(s) it uses and is checked against
+                them (judge + code); one that says more is replaced with the
+                profile's own line, or dropped when the letter already says it
               → at most 4 work/project examples, ranked by relevance to the job
                 (its requirements, and the job title's words counted double);
                 each says where it happened
               → short but true? free repairs in code first: opening and closing,
-                paragraphs, your courses and languages. Only if that is not
-                enough does the writer draft or rewrite again
+                paragraphs, then courses that match the job, your languages only
+                when the ad asks about German or English, and your best-fitting
+                unused bullets. Only if that is not enough does the writer
+                draft or rewrite again
               → whole-letter fact-check (judge + code) → clean-up (padding,
-                repeats, job-ad talk; "keen to learn" after the facts)
+                repeats, job-ad talk, any "keen to learn" sentence)
               → style revision by the writer only when the letter reads as
                 machine-like (predictability above 50), kept only if nothing new
                 is claimed
+              → final pass in code: stiff phrasing said plainly, a bullet split
+                into two short sentences joined back in your words, "In that
+                role," / "There," pointed at the right place, and "Earlier," /
+                "Previously," kept only when your dates agree
               → still too little? letter built from profile.json instead
            7  LaTeX → PDF, report.md, run_log.txt
 ```
@@ -413,7 +446,7 @@ job ad ──► 1  requirements (quote-verified) + job title/company
 The recruiter message is written before the letter on purpose: both prompts start with
 the same rules, style guide, job brief and facts, so Ollama's prompt cache lets the
 letter skip re-reading about 1,700 tokens. Every step that needs no model (the repairs,
-clean-up, ordering) runs before any extra call to the slow 27B writer.
+clean-up, ordering) runs before any extra call to the writer, the slowest model.
 
 **What the checks guard against** (deterministic code in `ats_checks.py` and
 `ats_pipeline.py`, on top of the judge model):
@@ -421,6 +454,10 @@ clean-up, ordering) runs before any extra call to the slow 27B writer.
 - adding a tool to a fact that does not mention it ("…ANSYS workflows using Python"),
   also via a follow-up sentence that cites only your skills list ("This work used
   Solidworks and FreeCAD for modeling.")
+- tying a tool from your skills list to a job or project whose bullets and tools do not
+  name it ("I used Solidworks for these tasks", "I used ROS2 and Gazebo during my time
+  as a Student Assistant"); naming it on its own ("My skills include Docker and Git")
+  is fine
 - inflation ("led", "expertise", "extensive", "hands-on", "in-depth", "proven"), made-up
   numbers, "1 feature" → "features"
 - merging two bullets into one claim, or attaching work to the wrong employer/project
@@ -430,8 +467,13 @@ clean-up, ordering) runs before any extra call to the slow 27B writer.
 - research interests presented as experience, coursework, skills or "focus"
 - an unfinished degree mentioned without saying so; schools renamed or translated, also
   half-translated ("Technical Hochschule Deggendorf")
-- "keen to learn X" when X is already in your profile, and empty "keen to learn about the
-  role" lines
+- any "keen to learn X" / "want to learn X" sentence: a letter says what you have done,
+  not which requirement you miss
+- "Earlier," / "Previously," that contradicts your profile's dates ("Earlier, as a
+  Student Assistant …" after a 2023 job, though that job started in 2026), and "In that
+  role," pointing at the wrong employer
+- stiff or repeated lines: "<place> was my workplace as <role>", "… is my current
+  school", a second "I am an aspiring …" or degree sentence under the opening
 - text copied from the job ad or addressed to the reader ("you will…"), restating
   the job's requirements, and tool lists longer than three items
 - the same place named in every sentence ("As a … at …, I …" → "There, I also …"), or
@@ -441,9 +483,10 @@ clean-up, ordering) runs before any extra call to the slow 27B writer.
   sentences in a row opening with "I" ("I wrote … at SOCO …" → "At SOCO …, I wrote …")
 - the job title with no noun after it or with its gender tag ("applying for the
   Werkstudent - Lebensdauertest (all genders) at …" → "… Lebensdauertest position at …")
-- a short letter topped up with courses unrelated to the job: the added courses come
-  from the degree whose coursework matches the requirements you meet (B.Sc *Power
-  Electronics* for a power-electronics job), else from your current degree
+- a short letter topped up with courses unrelated to the job: only courses whose field
+  appears in the ad are added (B.Sc *Power Electronics* for a power-electronics job,
+  never *Additive Manufacturing* for a computer-vision role), your language levels
+  only when the ad asks about German or English
 - your job title read as a place ("… at Student Assistant (SHK) at Robotics Lab" → "… as a
   Student Assistant (SHK) at the Robotics Lab"); titles that already say what they are
   ("Masterarbeit: …", "Internships: …") get no extra "position"; project names that are
@@ -518,7 +561,7 @@ Generated CVs and letters go to `ats_outputs\` in the project folder instead (se
 | `ATS_WRITER` | letter-writer model(s), default `gemma4:12b-it-qat`; comma-separate several to draft in parallel |
 | `ATS_BACKEND` | `ollama` (default), or `openai` for another OpenAI-compatible server (vLLM, llama.cpp, LM Studio) |
 | `ATS_BASE_URL` | model server, default `http://localhost:11434` (Ollama); with `openai`, the address ending in `/v1` |
-| `ATS_MODEL` | model used when the judge field is empty (default: the first model Ollama has downloaded) |
+| `ATS_MODEL` | judge for scripts that name no model (default: `ATS_MODELS`'s judge); an empty **Judge model** field in Settings uses the first model Ollama has loaded |
 | `ATS_EMBED_MODEL` | embedding model, default `nomic-embed-text` |
 | `JOBSEARCH_DATA_DIR` | override the data folder |
 | `JOBS_DB` | override the job database path |
@@ -540,6 +583,7 @@ Generated CVs and letters go to `ats_outputs\` in the project folder instead (se
 | `ats_regions.py` | per-market conventions (photo, date of birth, nationality) |
 | `fit_score.py` | 0–100 fit score and profile lookup |
 | `daily_sweep.py` | once-a-day sweep and Windows task |
+| `related_skills.py` | suggested search keywords for your skills (ESCO + local model) |
 | `system_checks.py` | the health checks (Settings): API, Ollama, hardware and pipeline |
 | `linkedin_jobs.py` | job model, SQLite store, shared HTTP helpers, LinkedIn APIs |
 | `eu_student_jobs.py` | EURES and student-job classification |
@@ -561,7 +605,7 @@ Generated CVs and letters go to `ats_outputs\` in the project folder instead (se
 | "Could not reach http://localhost:1234/v1" | an old LM Studio setting: remove the `ATS_BASE_URL` and `ATS_BACKEND` environment variables, or set the Settings → *Server* field to `http://localhost:11434` |
 | "Not downloaded in Ollama: …" | run the `ollama pull …` command it names |
 | A model loads but is extremely slow | it is probably a Qwen3.5-architecture model at a normal quantisation — use the defaults |
-| A job takes several minutes | 2–3½ minutes is normal with the 27B writer on a 6 GB GPU; `run_log.txt` in the output folder lists every model call with its time. A smaller writer is faster but its letters lose more to the fact-check |
+| A job takes several minutes | 3–4½ minutes is normal with the Gemma 4 12B writer on a 6 GB GPU (the first job after Ollama starts takes longer while the models load); `run_log.txt` in the output folder lists every model call with its time. A smaller writer is faster but its letters lose more to the fact-check |
 | "answer ran past its … token limit" | raise the model's context in `MODEL_CONTEXT` (`ats_pipeline.py`) to 8k+ |
 | Cover letter "assembled from profile.json" | the writer's draft lost too much to the fact-check; `report.md` shows the draft and the reason. The letter is true but plain — personalise it |
 | "no cover letter: none of the required skills are in your profile" | intentional: the CV is still written; a letter would have nothing relevant to say |
@@ -576,6 +620,8 @@ Generated CVs and letters go to `ats_outputs\` in the project folder instead (se
 
 Everything runs locally: job searches call public job APIs, and the CV/letter models run
 in Ollama on your machine. Nothing from your profile is sent to an online AI service.
+The suggested-keywords lookup sends only your skill names (e.g. "ROS2", "KiCAD") to the
+public ESCO API, nothing else from the profile.
 
 **Before pushing this project to GitHub**, keep your personal data out of the repository.
 The included `.gitignore` already excludes `profile.json` and its backups, generated
@@ -586,10 +632,36 @@ placeholder profile such as the example above instead of your real one.
 
 ## Recent changes
 
+**November 2026**
+- **New default models**: `qwen3.5:4b` as judge and `gemma4:12b-it-qat` as letter writer,
+  after side-by-side runs on the same ten jobs against the old pair (Qwen3-4B + Bonsai
+  27B), `granite4.2:8b` as judge and `qwen3.5:9b` as writer (see
+  [Local models (Ollama)](#local-models-ollama)). Scripts that name no model now use
+  these defaults instead of whichever model Ollama has loaded.
+- **Truer, better-targeted letters**: no skill from your skills list tied to a job that
+  does not mention it, no "keen to learn" sentences, coursework and research interests
+  only where they match the job, your most relevant experience chosen per job, no
+  repeated opening or degree line, plain wording in place of stiff turns, split bullets
+  joined back, and "In that role" / "Earlier" checked against your profile. Short
+  letters are topped up only with job-relevant lines.
+- **German-language requirements**: "Deutsch- oder Englischkenntnisse" (German *or*
+  English) and "Deutschkenntnisse runden Dein Profil ab" (rounds off your profile) are no
+  longer reported as hard German requirements. Skill names from German ads are given in
+  English.
+- **Suggested keywords** for the daily sweep, looked up in ESCO and checked by your local
+  model whenever your profile's skills change (see [Using the app](#using-the-app)).
+  The Daily sweep window opens one section at a time so it always fits on screen.
+- **Pipeline health checks**: Settings → Health checks → *Pipeline* tests embeddings,
+  the judge, the writer and a full CV + letter on a sample job.
+- **Report wording**: "bullet(s) reworded" only counts bullets that actually changed.
+- **Leaner code**: the standalone command-line tools of seven provider modules were
+  removed (the app and the documented commands are unchanged).
+
 **October 2026**
 - **Renamed** from *EU Job Search* to **Jobsearch Assistant** (it covers Europe, the US and
-  Asia-Pacific): `JobsearchAssistant.exe`, data in `%APPDATA%\JobsearchAssistant` (an old
-  `%APPDATA%\EUJobSearch` folder is moved there on first start).
+  Asia-Pacific): `JobsearchAssistant.exe`, data in `%APPDATA%\JobsearchAssistant` (the old
+  `%APPDATA%\EUJobSearch` folder was merged in by hand; it is no longer moved
+  automatically).
 - **Ollama instead of LM Studio** for the local models: its own API with the context set
   per request, thinking switched off, a clear stop when a model is not downloaded, and
   health checks for the Ollama program, server version and models. See

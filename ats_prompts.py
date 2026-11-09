@@ -148,15 +148,17 @@ Content:
 - A requirement whose proof is "listed only" (a skill or course) may be named in one
   short sentence. Never list tools or skills in bulk: name at most three tools in
   the whole letter, each inside a sentence about what the candidate did.
-- The candidate does NOT have: {gaps}. Do not claim them; you may say the candidate is
-  keen to learn ONE of them, in one sentence.
+- The candidate does NOT have: {gaps}. Do not claim them and do not mention them - no
+  "keen to learn" sentence.
+- Research interests and coursework only where they match this job; never list
+  them all.
 - Never write a sentence that only restates a job requirement ("C++ is required for
   this role"), and never claim contact or collaboration with the employer.
 - Follow the rules and the writing style above for every sentence.
 
 Form: 3 or 4 paragraphs separated by one blank line, 180-280 words. (1) the role and
-the candidate's current studies; (2) and (3) the chosen facts; (4) optional: one
-"keen to learn" sentence. First person ("I"); never address the reader as "you" or
+the candidate's current studies; (2) and (3) the chosen facts; (4) optional: one more
+matching fact. First person ("I"); never address the reader as "you" or
 write "we"/"our" as the company; never copy sentences from the job ad. No salutation,
 sign-off, date, address or markdown.
 

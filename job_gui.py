@@ -78,6 +78,7 @@ from discover_jobs import REGIONS as DISCOVERY_REGIONS, SOURCES as DISCOVERY_SOU
 from fit_score import (FitScorer, default_profile_path, is_bundled_copy, load_default_scorer,
                        remember_profile_path, rescore)
 import daily_sweep
+import related_skills
 import system_checks
 
 # board.country ("DE", "US", "JP", ...) -> jobspy's expected country_indeed spelling
@@ -208,6 +209,8 @@ class App(tk.Tk):
         self.after(120, self._drain)
         self.load_saved()
         self.after(1500, self._maybe_auto_sweep)
+        self._profile_mtime = 0.0
+        self.after(4000, self._watch_profile)
 
     # ---------------- styling ----------------
 
@@ -1370,18 +1373,32 @@ class App(tk.Tk):
 
     def _section(self, parent, title: str, summary) -> ttk.Frame:
         """A closed section: a link line 'Title ▸  (summary)' that opens a body frame
-        below it. `summary()` returns the short text shown while it is closed."""
+        below it. `summary()` returns the short text shown while it is closed.
+        Sections in one parent open one at a time: with "Search terms" and "Suggested
+        keywords" both open the Daily sweep window grew past the screen and hid its
+        Save button (2026-11-09)."""
         head = ttk.Button(parent, style="Link.TButton")
         head.pack(anchor="w", pady=(8, 0))
         body = ttk.Frame(parent, padding=(16, 2, 0, 4))
         state = {"open": False}
+        siblings = parent.__dict__.setdefault("_sections", [])
 
         def paint() -> None:
             text = summary() if callable(summary) else summary
             arrow = "▾" if state["open"] else "▸"
             head.configure(text=f"{title} {arrow}" + (f"   ({text})" if text else ""))
 
+        def close() -> None:
+            if state["open"]:
+                state["open"] = False
+                body.pack_forget()
+                paint()
+
         def toggle() -> None:
+            if not state["open"]:
+                for other in siblings:
+                    if other is not close:
+                        other()
             state["open"] = not state["open"]
             if state["open"]:
                 body.pack(fill="x", after=head)
@@ -1389,6 +1406,7 @@ class App(tk.Tk):
                 body.pack_forget()
             paint()
 
+        siblings.append(close)
         head.configure(command=toggle)
         body.repaint = paint
         self.after_idle(paint)
@@ -1521,6 +1539,68 @@ class App(tk.Tk):
         self.sw_ua_days = tk.IntVar(value=int(ua.get("days", 3)))
         ttk.Spinbox(row4, from_=1, to=30, textvariable=self.sw_ua_days, width=4).pack(side="left")
         ttk.Label(row4, text="days").pack(side="left", padx=4)
+
+        # ── search keywords related to the profile's skills (related_skills.py) ──
+        try:
+            prof = json.loads(Path(self.ats_profile_path.get().strip()).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            prof = None
+        current = (cfg["workday"]["queries"] + cfg["research"]["keywords"]
+                   + [b["query"] for b in cfg["ba"]["searches"]]
+                   + cfg["adzuna_eu"].get("roles", []) + cfg["us_asia"].get("fields", []))
+        stored = related_skills.load()
+        sugg = related_skills.keywords(stored, prof, exclude=current)
+        sk = self._section(f, "Suggested keywords",
+                           lambda: f"{len(sugg)} related to your profile's skills" if sugg
+                           else "none yet")
+        ttk.Label(sk, style="Muted.TLabel", wraplength=480, justify="left",
+                  text="Other words job ads use for the skills in your profile, from the EU skills "
+                       "database (ESCO) and your local model. They are looked up after each "
+                       "profile change. Adding one only widens the searches - your CV and "
+                       "letters never claim it.").pack(anchor="w")
+        when = stored.get("updated", "").replace("T", " ")[:16]
+        ttk.Label(sk, style="Muted.TLabel",
+                  text=f"Last looked up: {when}" if when else "Not looked up yet.").pack(anchor="w")
+        lb = tk.Listbox(sk, selectmode="extended", height=8, width=64, font=("Consolas", 9),
+                        relief="solid", borderwidth=1, bg=self.BG, fg=self.TEXT,
+                        selectbackground=self.SELECT, selectforeground="white")
+        lb.pack(fill="x", pady=(4, 0))
+        for kw, skill, src in sugg:
+            lb.insert("end", f"{kw:<34} for {skill} ({src})")
+        row5 = ttk.Frame(sk)
+        row5.pack(fill="x", pady=(4, 0))
+        ttk.Label(row5, text="Add to").pack(side="left")
+        targets = {"Research keywords": self.sw_res, "Workday searches": self.sw_wd,
+                   "US & Asia searches": self.sw_ua_fields, "Adzuna Europe roles": self.sw_ae_roles,
+                   "Arbeitsagentur searches": None}
+        target = ttk.Combobox(row5, values=list(targets), state="readonly", width=24)
+        target.set("Research keywords")
+        target.pack(side="left", padx=6)
+
+        def add_selected() -> None:
+            picked = [sugg[i][0] for i in lb.curselection()]
+            box = targets[target.get()]
+            for kw in picked:
+                if box is None:          # Arbeitsagentur: one search per line
+                    self.sw_ba.insert("end", ("" if self.sw_ba.get("end-2c") == "\n" else "\n")
+                                      + f"{kw} |  | 0")
+                    continue
+                have = [x.strip().lower() for x in box.get().split(",") if x.strip()]
+                if kw.lower() not in have:
+                    box.insert("end", (", " if box.get().strip() else "") + kw)
+            for i in reversed(lb.curselection()):
+                lb.delete(i)
+                sugg.pop(i)
+            sk.repaint()                  # "N related ..." counts what is left
+            if picked:
+                self.log(f"[skills] Added {', '.join(picked)} to {target.get()} - press Save to keep.")
+
+        ttk.Button(row5, text="Add selected", command=add_selected).pack(side="left")
+        ttk.Button(row5, text="Look up again",
+                   command=lambda: (self._related_skills(force=True),
+                                    self.log("[skills] Looking up again in the background; reopen "
+                                             "this window when it says it is done."))
+                   ).pack(side="left", padx=6)
 
         btns = ttk.Frame(f)
         btns.pack(side="bottom", fill="x", pady=(16, 0))
@@ -1926,7 +2006,7 @@ class App(tk.Tk):
                                + (f". {m.note}" if m.note else "") + "\n")
         text.configure(state="disabled")
 
-    # ---------------- tab: unit tests ----------------
+    # ---------------- health checks (Settings) ----------------
 
     # ---------------- page: settings ----------------
 
@@ -2597,6 +2677,41 @@ class App(tk.Tk):
             self.scorer = scorer
             self.store.scorer = scorer.score
         self.log(f"[ATS] Profile set to {path} (remembered for next time)")
+        self._related_skills()
+
+    # ---------------- related search keywords ----------------
+
+    def _related_skills(self, force: bool = False) -> None:
+        """Look up search keywords related to the profile's skills in the background
+        (ESCO + the judge model) when the skills changed since the last lookup; see
+        related_skills.py. Shown under Daily sweep -> Suggested keywords."""
+        path = self.ats_profile_path.get().strip() or str(default_profile_path())
+        base_url = self.ats_base_url.get().strip() or DEFAULT_BASE_URL
+        judge = self.ats_model.get().strip() or DEFAULT_LOCAL_MODELS
+        log = lambda m: self._ui(lambda m=m: self.log(m))
+        if force:
+            try:
+                profile = json.loads(Path(path).read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                self.log(f"[skills] Cannot read {path}: {exc}")
+                return
+            threading.Thread(target=related_skills.refresh, daemon=True, name="related-skills",
+                             args=(profile, base_url, judge, log, True)).start()
+        else:
+            related_skills.refresh_in_background(path, base_url, judge, log)
+
+    def _watch_profile(self) -> None:
+        """Every 2 minutes: if profile.json was saved since the last look, refresh the
+        related keywords (a no-op when only non-skill parts changed)."""
+        try:
+            path = Path(self.ats_profile_path.get().strip() or default_profile_path())
+            mtime = path.stat().st_mtime
+        except (OSError, AttributeError):
+            mtime = 0.0
+        if mtime and mtime != self._profile_mtime:
+            self._profile_mtime = mtime
+            self._related_skills()
+        self.after(120_000, self._watch_profile)
 
     def _ats_load_jd(self) -> None:
         path = filedialog.askopenfilename(

@@ -5,8 +5,8 @@ Deterministic checks and keyword analysis for the tailoring pipeline.
 
 Everything here runs in code, not in the model: which keywords the candidate
 can honestly use, whether a rewritten bullet kept its facts, and whether the
-cover letter and recruiter message have the requested shape. A 7B model
-follows rules loosely, so nothing it writes reaches the CV unchecked.
+cover letter and recruiter message have the requested shape. Small local
+models follow rules loosely, so nothing they write reaches the CV unchecked.
 """
 
 from __future__ import annotations
@@ -391,7 +391,10 @@ def german_requirement(job_description: str) -> tuple[int, str]:
 # wanted, not required, so no hard requirement.
 _OPTIONAL = re.compile(r"^[^.;]{0,40}?\b(not required|not necessary|not a must|optional|an asset|"
                        r"a plus|an advantage|advantageous|nice to have|preferred|von vorteil|"
-                       r"wünschenswert|keine voraussetzung|nicht erforderlich)\b", re.I)
+                       r"wünschenswert|keine voraussetzung|nicht erforderlich|"
+                       # "Gute Deutschkenntnisse runden Dein Profil ab" - rounds off,
+                       # not required (Siemens, 2026-11-08)
+                       r"runde[nt]?\s+(?:dein|ihr|das)\s+profil\s+ab)\b", re.I)
 
 
 def language_warning(job_description: str, profile: dict) -> str:

@@ -1,5 +1,5 @@
 """
-system_checks.py — health checks behind the app's Unit tests tab.
+system_checks.py — health checks behind Settings -> Health checks in the app.
 
 Four groups, each check reporting pass / warn / fail / skip with a reason:
 
